@@ -17,14 +17,16 @@ class WatchingLeague(LeaguePool):
     def poll(self):
         distributed = dist.is_initialized()
         rank = dist.get_rank() if distributed else 0
-        room = self.watch.get('max_members', 20) - len(self.members)
+        limit = self.watch.get('max_members', 20)
+        room = limit - len(self.members)
         mode = self.watch.get('team_size', 3)
         starts = self.watch.get('starts', 'mixed')
+        replace = self.watch.get('replace_weakest', False) and not any(m.get('departing') for m in self.members)
         known = self.beaten | {m['key'] for m in self.members if m.get('team_size', 3) == mode}
         candidates = [None]
         if rank == 0:
             found = []
-            if room > 0 and (starts != 'replay' or mode in self.replay_modes):
+            if (room > 0 or replace) and (starts != 'replay' or mode in self.replay_modes):
                 try:
                     paths = list(Path(self.watch['directory']).glob(self.watch.get('pattern', '*.pt')))
                 except OSError:
@@ -42,7 +44,7 @@ class WatchingLeague(LeaguePool):
             dist.broadcast_object_list(candidates, src=0, device=self.env.device)
         members = []
         for _, path, stamp in candidates[0]:
-            if room <= 0:
+            if room <= 0 and (not replace or members):
                 break
             packet = [None]
             if rank == 0:
@@ -59,6 +61,15 @@ class WatchingLeague(LeaguePool):
             if key in known:
                 self.seen[path] = stamp
                 continue
+            if room <= 0:
+                scores = [(goals[0] / sum(goals), i) for i, goals in enumerate(self.totals)
+                          if sum(goals) and not self.retired[i] and not self.members[i].get('retry', False)
+                          and self.members[i].get('team_size', 3) == mode]
+                if scores:
+                    self.remove_member(max(scores)[1])
+                    room = limit - len(self.members)
+                if room <= 0:
+                    break
             entry = dict(path=path, key=key, name=Path(path).stem,
                          team_size=mode, starts=starts, retry=False)
             model, error = None, None

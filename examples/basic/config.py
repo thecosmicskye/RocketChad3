@@ -32,6 +32,10 @@ from rewards import reward
 # 'opponent_watch': {'directory': 'opponents', 'team_size': 3, 'max_members': 20}.
 # Publish checkpoint files atomically. The member limit includes draining and
 # retryable opponents; see watch_opponents.py for polling and start options.
+# Add 'replace_weakest': True inside opponent_watch to rotate the same-mode
+# non-retry opponent with the highest learner goal share when a new checkpoint
+# appears. Opponents without goals are left alone.
+# The new checkpoint gets a chance; its strength is not known until it plays.
 # Multi-GPU models must use every optimized parameter on every rank.
 # To use standard DDP, set 'grad_reduce': 'ddp', leave microbatch at 0, and use
 # every trainable parameter on every rank.

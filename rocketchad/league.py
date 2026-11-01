@@ -44,6 +44,11 @@ class LeaguePool:
     def add_member(self, member):
         self.add_members((member,))
 
+    def remove_member(self, index):
+        self.members[index]['departing'] = True
+        self.retired[index] = True
+        self.draw()
+
     def add_members(self, members):
         added = 0
         for member in members:
@@ -97,7 +102,8 @@ class LeaguePool:
         counts = presence.cpu().tolist()
         active = {i for i, count in enumerate(counts[:len(self.members)]) if count}
         self.replay_modes = {mode for mode, missing in zip((1, 2, 3), counts[len(self.members):]) if not missing}
-        keep = [i for i, member in enumerate(self.members) if member['key'] not in self.beaten or i in active]
+        keep = [i for i, member in enumerate(self.members)
+                if i in active or (member['key'] not in self.beaten and not member.get('departing'))]
         if len(keep) != len(self.members):
             remap = self.active.new_full((len(self.members),), -1)
             remap[keep] = torch.arange(len(keep), device=self.env.device)
@@ -115,7 +121,7 @@ class LeaguePool:
             arenas = [arena for arena, size in enumerate(modes) if league[arena] and size == mode]
             matching = [i for i, member in enumerate(self.members)
                         if member.get('team_size', 3) == mode and member['key'] not in self.beaten
-                        and self.supports_start(member)]
+                        and not member.get('departing') and self.supports_start(member)]
             available = [i for i in matching if not self.retired[i] or
                          (self.members[i].get('retry', False) and i not in active)]
             if available and all(self.tried[i] for i in available):
@@ -185,12 +191,14 @@ class LeaguePool:
             self.totals[i][1] += int(goals_against)
             total = sum(self.totals[i])
             share = self.totals[i][0] / total if total else None
-            if (share is not None and not self.retired[i] and self.retire_goal_share is not None and total >= self.min_goals
+            if (share is not None and self.retire_goal_share is not None and total >= self.min_goals
                     and share >= self.retire_goal_share):
-                self.retired[i] = changed = True
-                if not self.members[i].get('retry', False):
+                if not self.retired[i]:
+                    self.retired[i] = changed = True
+                if not self.members[i].get('retry', False) and self.members[i]['key'] not in self.beaten:
                     key = self.members[i]['key']
                     self.beaten.add(key)
+                    changed = True
                     for j, member in enumerate(self.members):
                         if member['key'] == key:
                             self.retired[j] = True
@@ -198,7 +206,8 @@ class LeaguePool:
                        goals_against=self.totals[i][1],
                        goal_share=self.totals[i][0] / sum(self.totals[i]) if sum(self.totals[i]) else None,
                        retired=self.retired[i]) for i, member in enumerate(self.members)]
-        waiting = any(self.retired[i] and member.get('retry', False) and member['key'] not in self.beaten
+        waiting = any(member.get('departing') or (self.retired[i] and member.get('retry', False)
+                      and member['key'] not in self.beaten)
                       for i, member in enumerate(self.members))
         waiting |= not self.resample_updates and any(member['key'] in self.beaten for member in self.members)
         if changed or waiting or (self.resample_updates and self.updates % self.resample_updates == 0):

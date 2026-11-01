@@ -22,6 +22,8 @@ from rocketchad.league import LeaguePool
 # Reserved arenas train one side, including when they fall back to self-play.
 # Add the same members on all ranks between rollouts with add_member; metadata
 # must use basic Python types. model_factory recreates added models on resume.
+# remove_member(index) stops assigning new games and releases that member after
+# its existing games finish. Call it on every rank between rollouts.
 # A custom pool supplies learner_indices, rebind, begin_rollout, override_actions,
 # on_step, end_rollout, state_dict/load_state_dict and
 # model_state_dict/load_model_state_dict.
