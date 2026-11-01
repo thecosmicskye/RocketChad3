@@ -14,7 +14,10 @@
 # directory to PYTHONPATH. NativeReplayStarts requires six car slots per arena.
 # For each replay frame provide its blue-first cars, ball, car configurations
 # and 34 boost pads as RocketGPU state objects, then use them in a state setter:
+# from numpy.random import default_rng
+# from rocketchad.replay_cache import sample_cache, public_states
 # from rocketchad.replay import NativeReplayStarts
+# cars, balls, configs, pads = public_states(sample_cache('starts.bin', 4096, default_rng(1)))
 # def make_state_setter(env):
 #     return NativeReplayStarts(env, cars, balls, configs, pads, fraction=0.5)
 
