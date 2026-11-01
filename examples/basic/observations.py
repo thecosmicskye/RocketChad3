@@ -7,6 +7,7 @@ class Observation:
     def __init__(self, env):
         device = env.device
         self.team_size = env.players // 2
+        self.layout = env.team_layout
         self.player_slots = torch.tensor(list(range(self.team_size)) + list(range(3, 3 + self.team_size)), device=device)
         present = torch.zeros(6, dtype=torch.bool, device=device)
         present[self.player_slots] = True
@@ -16,9 +17,11 @@ class Observation:
             base = 0 if i < 3 else 3
             order.append([i, base + (i + 1) % 3, base + (i + 2) % 3] + list(range(3 - base, 6 - base)))
         self.order = torch.tensor(order, device=device)
-        self.present = present[self.order]
+        self.present = present[self.order] if self.layout is None else self.layout.ordered_presence(self.order)
 
     def pad(self, values):
+        if self.layout is not None:
+            return self.layout.to_logical(values)
         if self.team_size == 3:
             return values
         missing = values.new_zeros((values.shape[0], 3 - self.team_size, *values.shape[2:]))
@@ -37,7 +40,9 @@ class Observation:
                           vel[:, self.order] * rot / 2300, forward[:, self.order] * rot,
                           up[:, self.order] * rot, angular[:, self.order] * rot / 5.5,
                           scalars[:, self.order]), -1)
-        if self.team_size != 3:
+        if self.layout is not None:
+            cars = torch.where(self.present[..., None], cars, torch.zeros_like(cars))
+        elif self.team_size != 3:
             cars = torch.where(self.present[None, :, :, None], cars, torch.zeros_like(cars))
         cars = cars.reshape(n, 6, 114)
         own = pos * self.rotation[None] / 4096
@@ -45,7 +50,8 @@ class Observation:
         ball_vel = b['vel'][:, None] * self.rotation[None] / 6000
         ball_ang = b['ang_vel'][:, None] * self.rotation[None] / 6
         pads = env.pads['is_active'].reshape(n, 34).float()[:, None].expand(-1, 6, -1)
-        observation = torch.cat((own, ball_pos, ball_vel, ball_ang, cars, self.pad(env.last_action), pads), -1)
+        actions = env.last_action if self.layout is not None else self.pad(env.last_action)
+        observation = torch.cat((own, ball_pos, ball_vel, ball_ang, cars, actions, pads), -1)
         if self.team_size != 3:
             observation = observation.index_select(1, self.player_slots)
         return observation.reshape(n * env.players, self.size)

@@ -135,6 +135,11 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                                                        options={'triton.cudagraphs': False}))
         return env
 
+    def player_rows(env):
+        full = env.arenas * env.players
+        active = None if env.team_layout is None else env.team_layout.present.flatten().nonzero().flatten()
+        return full, active, full if active is None else active.numel()
+
     env = make_environment()
     rollout_graph = None
     host_observations = None
@@ -147,7 +152,7 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
         started = phase_started = time.monotonic()
         next_save = config['checkpoint_seconds']
         obs = env.observe()
-        rows = config['arenas'] * config['team_size'] * 2
+        full_rows, active, rows = player_rows(env)
         timeout_values = None
         while True:
             now = time.monotonic()
@@ -183,6 +188,7 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                 env = make_environment()
                 rollout_graph = RolloutGraph((env,), env) if config.get('rollout_graph', False) else None
                 obs = env.observe()
+                full_rows, active, rows = player_rows(env)
                 timeout_values = None
                 phase_elapsed = 0.0
             if save or stop:
@@ -204,8 +210,8 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
             dones = torch.empty_like(log_probs, dtype=torch.bool)
             if config.get('timeout_bootstrap', False):
                 if timeout_values is None:
-                    timeout_values = TimeoutValues(model, horizon, rows, config['minibatch'], device,
-                                                   obs_size=obs.shape[-1], players=env.players)
+                    timeout_values = TimeoutValues(model, horizon, full_rows, config['minibatch'], device,
+                                                   owned=active, obs_size=obs.shape[-1], players=env.players)
                 timeout_values.begin()
             iteration_started = time.monotonic()
             with torch.no_grad():
@@ -214,15 +220,19 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
 
                 def decide():
                     nonlocal obs
-                    logits, value = rollout_forward(obs)
+                    learner_obs = obs if active is None else obs.index_select(0, active)
+                    logits, value = rollout_forward(learner_obs)
                     log_all = logits.log_softmax(-1)
                     probabilities = log_all.exp()
                     action = probabilities.div(torch.empty_like(probabilities).exponential_()).argmax(-1)
+                    applied = action if active is None else action.new_zeros(full_rows).index_copy_(0, active, action)
                     if timeout_values is None:
-                        following, reward_value, done = env.step(action, phase['name'])
+                        following, reward_value, done = env.step(applied, phase['name'])
                         info = None
                     else:
-                        following, reward_value, done, info = env.step(action, phase['name'], capture_transition=True)
+                        following, reward_value, done, info = env.step(applied, phase['name'], capture_transition=True)
+                    if active is not None:
+                        reward_value, done = reward_value.index_select(0, active), done.index_select(0, active)
                     if rollout_graph is None:
                         obs = following
                     else:
@@ -230,22 +240,25 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                     return action, log_all.gather(-1, action[:, None]).squeeze(-1), value, reward_value, done, info
 
                 for index in range(horizon):
+                    learner_obs = obs if active is None else obs.index_select(0, active)
                     if host_observations is None:
-                        observations[index].copy_(obs)
+                        observations[index].copy_(learner_obs)
                     else:
-                        host_observations.record(index, obs)
+                        host_observations.record(index, learner_obs)
                     action, log_prob, value, reward_value, done, info = decide() if rollout_graph is None else rollout_graph(decide)
                     actions[index] = action
                     log_probs[index] = log_prob
                     values[index], rewards[index], dones[index] = value, reward_value, done
                     if timeout_values is not None:
                         timeout_values.capture(index, info['transition_observation'], info)
-                _, next_value = rollout_forward(obs)
+                learner_obs = obs if active is None else obs.index_select(0, active)
+                _, next_value = rollout_forward(learner_obs)
                 if timeout_values is not None:
                     timeout_values.flush()
-                    truncated = timeout_values.truncated
+                    truncated = timeout_values.truncated if active is None else timeout_values.truncated.index_select(1, active)
+                    timeout_bootstrap = timeout_values.values if active is None else timeout_values.values.index_select(1, active)
                     advantages, returns = truncation_gae(rewards, values, next_value, dones & ~truncated,
-                                                         truncated, timeout_values.values,
+                                                         truncated, timeout_bootstrap,
                                                          phase['gamma'], phase['gae_lambda'])
                 else:
                     advantages = torch.empty_like(rewards)

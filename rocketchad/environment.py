@@ -6,16 +6,42 @@ import torch
 class Environment:
     def __init__(self, config, example, seed, device):
         self.config = config
-        self.arenas, self.players = config['arenas'], 2 * config['team_size']
+        self.arenas = config['arenas']
         self.tick_skip, self.device, self.seed = config['tick_skip'], torch.device(device), seed
+        self.team_layout = None
+        fractions = config.get('team_size_fractions')
+        if fractions is not None:
+            from .team_layout import TeamLayout, mixed_counts
+            fractions = {int(key): value for key, value in fractions.items()}
+            counts = mixed_counts(self.arenas, fractions)
+            generator = torch.Generator().manual_seed(seed)
+            pairs = torch.randperm(self.arenas // 2, generator=generator)
+            sizes = torch.full((self.arenas,), 3, dtype=torch.int64)
+            offset = 0
+            for mode in (1, 2):
+                length = counts[mode] // 2
+                selected = (pairs[offset:offset + length, None] * 2 + torch.arange(2)).flatten()
+                sizes[selected] = mode
+                offset += length
+            self.team_layout = TeamLayout(sizes.to(self.device))
+        self.players = 6 if self.team_layout is not None else 2 * config['team_size']
         self.stream = torch.cuda.current_stream(self.device).cuda_stream
         settings = rg.SimConfig()
         settings.env_count, settings.max_cars_per_env = self.arenas, self.players
         settings.enable_boost_pads = settings.enable_car_car_collisions = settings.enable_demos = settings.enable_scoring = 1
         settings.tick_dt = 1 / 120
         self.sim = rg.BatchSim(settings)
-        self.sim.set_env_car_count([self.players] * self.arenas, self.stream)
-        self.sim.set_teams(([rg.Team.Blue] * (self.players // 2) + [rg.Team.Orange] * (self.players // 2)) * self.arenas, self.stream)
+        if self.team_layout is None:
+            self.sim.set_env_car_count([self.players] * self.arenas, self.stream)
+            self.sim.set_teams(([rg.Team.Blue] * (self.players // 2) + [rg.Team.Orange] * (self.players // 2)) * self.arenas, self.stream)
+        else:
+            team_sizes = self.team_layout.sizes.cpu().tolist()
+            self.sim.set_env_car_count([2 * size for size in team_sizes], self.stream)
+            self.sim.set_teams([team for size in team_sizes for team in [rg.Team.Blue] * size + [rg.Team.Orange] * (6 - size)], self.stream)
+            states = [rg.EnvState() for _ in range(self.arenas)]
+            for state in states:
+                state.car_visit_order_mode = 0
+            self.sim.upload_env_states(states, self.stream)
         self.sim.reset_to_kickoff(seed, self.stream)
 
         def fields(name):
@@ -47,9 +73,22 @@ class Environment:
     def observe(self):
         return self.observation(self)
 
+    def logical_car_field(self, name):
+        value = self.car[name]
+        if self.team_layout is None:
+            return value
+        shaped = value.reshape(self.arenas, 6, *value.shape[1:])
+        signed = {torch.uint16: torch.int16, torch.uint32: torch.int32, torch.uint64: torch.int64}.get(value.dtype)
+        if signed is not None:
+            shaped = shaped.view(signed)
+        result = self.team_layout.to_logical(shaped).reshape(value.shape)
+        return result if signed is None else result.view(value.dtype)
+
     def step(self, actions, phase, *, capture_transition=False):
         controls = self.actions[actions]
         self.last_action.copy_(controls.reshape(self.arenas, self.players, 8))
+        if self.team_layout is not None:
+            controls = self.team_layout.to_physical(self.last_action).reshape(-1, 8)
         for index, name in enumerate(('throttle', 'steer', 'pitch', 'yaw', 'roll', 'jump', 'boost', 'handbrake')):
             self.controls[name].copy_(controls[:, index])
         if self.goal_telemetry is not None:

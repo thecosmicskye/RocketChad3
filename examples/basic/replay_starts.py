@@ -6,7 +6,8 @@
 # env.sim.upload_ball_states(ball_states, env.stream)
 # env.sim.upload_boost_pad_states(boost_pad_states, env.stream)
 # torch.save(capture_states(env), 'replay_states.pt')
-# Capture and train with the same RocketGPU build, team size and car configuration.
+# Capture and train with the same RocketGPU build, car configuration and slot
+# capacity. Mixed-mode capture stores team sizes to match starts to their mode.
 # To enable replay starts, uncomment the example in config.py.
 # For RocketChad2's native replay cache, build CMakeLists.txt with
 # ROCKETCHAD_BUILD_NATIVE=ON and add the build directory and its rocketgpu/python
@@ -35,7 +36,10 @@ def _state_arrays(env):
 
 def capture_states(env):
     """Capture one converted RocketGPU frame per arena for torch.save."""
-    return {name: values.cpu() for name, values in _state_arrays(env).items()}
+    states = {name: values.cpu() for name, values in _state_arrays(env).items()}
+    if env.team_layout is not None:
+        states['team_sizes'] = env.team_layout.sizes.cpu()
+    return states
 
 
 class ReplayStarts:
@@ -44,9 +48,27 @@ class ReplayStarts:
         self.arrays = _state_arrays(env)
         self.frames = torch.load(path, map_location=env.device, weights_only=True)
         self.count = len(self.frames['ball_states'])
+        self.team_sizes = (env.team_layout.sizes if env.team_layout is not None else
+                           torch.full((self.arenas,), env.players // 2, device=self.device)
+                           if 'team_sizes' in self.frames else None)
+        self.mode_rows = None if self.team_sizes is None else {
+            mode: (self.frames['team_sizes'] == mode).nonzero().flatten()
+            for mode in (1, 2, 3)
+        }
 
     def __call__(self, reset):
-        rows = torch.randint(self.count, (self.arenas,), device=self.device)
         selected = reset & (torch.rand(self.arenas, device=self.device) < self.fraction)
+        if self.mode_rows is None:
+            rows = torch.randint(self.count, (self.arenas,), device=self.device)
+        else:
+            rows = torch.zeros(self.arenas, dtype=torch.int64, device=self.device)
+            available = torch.zeros_like(selected)
+            for mode, choices in self.mode_rows.items():
+                if choices.numel():
+                    match = self.team_sizes == mode
+                    pick = choices[torch.randint(choices.numel(), (self.arenas,), device=self.device)]
+                    rows = torch.where(match, pick, rows)
+                    available |= match
+            selected &= available
         for name, values in self.arrays.items():
             values.copy_(torch.where(selected[:, None], self.frames[name][rows], values))

@@ -9,9 +9,17 @@ class NativeReplayStarts:
 
         self.env = env
         self.fraction = fraction
-        rows = [i for i, row in enumerate(cars) if len(row) == env.players]
+        rows = [i for i, row in enumerate(cars) if len(row) == env.players or
+                (env.team_layout is not None and len(row) in (2, 4, 6))]
         self.cache = StartCache(*([values[i] for i in rows] for values in (cars, balls, configs, pads)),
                                 env.stream, env.sim.config)
+        self.mode_rows = None
+        if env.team_layout is not None:
+            self.mode_rows = {}
+            for mode in (1, 2, 3):
+                indices = [j for j, row in enumerate(rows) if len(cars[row]) == 2 * mode]
+                if indices:
+                    self.mode_rows[mode] = torch.tensor(indices, dtype=torch.int64, device=env.device)
         self.indices = torch.empty(env.arenas, dtype=torch.int64, device=env.device)
         self.selected = torch.empty(env.arenas, dtype=torch.bool, device=env.device)
         entry = env.sim.device_arrays()['car_configs']
@@ -22,9 +30,16 @@ class NativeReplayStarts:
         self.kickoff_configs = self.configs.clone()
 
     def __call__(self, reset):
-        rows = torch.randint(self.cache.size, (self.env.arenas,), device=self.env.device)
         self.selected.copy_(reset & (torch.rand(self.env.arenas, device=self.env.device) < self.fraction))
-        self.indices.copy_(torch.where(self.selected, rows, -1))
+        if self.mode_rows is None:
+            rows = torch.randint(self.cache.size, (self.env.arenas,), device=self.env.device)
+            self.indices.copy_(torch.where(self.selected, rows, -1))
+        else:
+            self.indices.fill_(-1)
+            for mode, choices in self.mode_rows.items():
+                pick = choices[torch.randint(choices.numel(), (self.env.arenas,), device=self.env.device)]
+                self.indices.copy_(torch.where(self.selected & (self.env.team_layout.sizes == mode), pick, self.indices))
+            self.selected.logical_and_(self.indices >= 0)
         self.cache.apply(self.env.sim, self.indices.data_ptr(), self.env.arenas,
                          self.env.stream, self.selected.data_ptr())
         self.configs.copy_(torch.where((reset & ~self.selected)[:, None], self.kickoff_configs, self.configs))

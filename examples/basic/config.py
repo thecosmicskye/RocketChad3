@@ -17,6 +17,10 @@ from rewards import reward
 
 # Arena and minibatch sizes are per GPU. Rollout graphs replay GPU operations,
 # so custom callbacks used with them should not depend on Python side effects.
+# For mixed modes, add 'team_size_fractions': {1: 0.25, 2: 0.25}; the rest
+# are 3v3 arenas. Custom observations and rewards should return six rows per
+# arena; env.team_layout identifies active slots and env.logical_car_field
+# maps car data into blue-three, orange-three order.
 # Multi-GPU models must use every optimized parameter on every rank.
 # To use standard DDP, set 'grad_reduce': 'ddp', leave microbatch at 0, and use
 # every trainable parameter on every rank.
