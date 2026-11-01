@@ -29,7 +29,8 @@ from rocketchad.league import LeaguePool
 # same number of learner_indices.
 def make_opponents(env, model, config, saved_state=None):
     entries = config.get('opponents', ()) if saved_state is None else saved_state['members']
-    if not entries and saved_state is None:
+    watch = config.get('opponent_watch')
+    if not entries and saved_state is None and not watch:
         return None
     members = []
     for entry in entries:
@@ -41,10 +42,19 @@ def make_opponents(env, model, config, saved_state=None):
             frozen.load_state_dict(checkpoint['model'])
         name = entry.get('name') or (Path(entry['path']).stem if 'path' in entry else str(len(members)))
         members.append(dict(entry, name=name, model=frozen))
-    fraction = config.get('league_fraction', 0.25) if saved_state is None else saved_state['fraction']
-    return LeaguePool(env, members, fraction, env.seed,
-                      precision=config['precision'],
-                      model_factory=lambda _: copy.deepcopy(model),
-                      retire_goal_share=config.get('league_retire_goal_share', 0.5),
-                      min_goals=config.get('league_min_goals', 64),
-                      resample_updates=config.get('league_resample_updates', 8))
+    fraction = (config['league_fraction'] if watch else config.get('league_fraction', 0.25)) if saved_state is None else saved_state['fraction']
+    if watch:
+        from watch_opponents import WatchingLeague
+        pool_type, extra = WatchingLeague, dict(watch=watch)
+    else:
+        pool_type, extra = LeaguePool, {}
+    pool = pool_type(env, members, fraction, env.seed,
+                     precision=config['precision'],
+                     model_factory=lambda _: copy.deepcopy(model),
+                     retire_goal_share=config.get('league_retire_goal_share', 0.5),
+                     min_goals=config.get('league_min_goals', 64),
+                     resample_updates=config.get('league_resample_updates', 8), **extra)
+    if watch and saved_state is None:
+        pool.poll()
+        pool.active.copy_(pool.pending)
+    return pool

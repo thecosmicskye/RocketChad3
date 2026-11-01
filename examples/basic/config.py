@@ -26,6 +26,10 @@ from rewards import reward
 # 'team_size': 3, 'retry': True}] and 'league_fraction': 0.25. The fraction
 # counts arenas; the learner controls one team in those arenas. See opponents.py
 # for per-opponent kickoff and replay starts.
+# To add new checkpoints automatically, set 'league_fraction': 0.25 and
+# 'opponent_watch': {'directory': 'opponents', 'team_size': 3, 'max_members': 20}.
+# Publish checkpoint files atomically. The member limit includes draining and
+# retryable opponents; see watch_opponents.py for polling and start options.
 # Multi-GPU models must use every optimized parameter on every rank.
 # To use standard DDP, set 'grad_reduce': 'ddp', leave microbatch at 0, and use
 # every trainable parameter on every rank.
@@ -49,3 +53,6 @@ CONFIG = {
         {'name': 'goals', 'seconds': 0, 'horizon': 32, 'gamma': 0.999, 'gae_lambda': 0.99, 'critic_burnin': 16, 'reset_critic': True},
     ],
 }
+
+if CONFIG.get('opponent_watch'):
+    CONFIG.setdefault('league_fraction', 0.25)

@@ -42,19 +42,26 @@ class LeaguePool:
         self.active.copy_(self.pending)
 
     def add_member(self, member):
-        member = dict(member)
-        identity = (member.get('team_size', 3), member['key'])
-        if member['key'] in self.beaten or any((item.get('team_size', 3), item['key']) == identity for item in self.members):
-            return
-        member['model'].to(self.env.device).eval().requires_grad_(False)
-        self.members.append(member)
-        self.forward.append(training_forward(member['model'], self.precision))
-        self.retired.append(False)
-        self.tried.append(False)
-        self.totals.append([0, 0])
-        self.stats = torch.cat((self.stats, self.stats.new_zeros((1, 3))))
-        self.start_modes = torch.cat((self.start_modes, self.start_modes.new_tensor([STARTS[member.get('starts', 'mixed')]])))
-        self.draw()
+        self.add_members((member,))
+
+    def add_members(self, members):
+        added = 0
+        for member in members:
+            member = dict(member)
+            identity = (member.get('team_size', 3), member['key'])
+            if member['key'] in self.beaten or any((item.get('team_size', 3), item['key']) == identity for item in self.members):
+                continue
+            member['model'].to(self.env.device).eval().requires_grad_(False)
+            self.members.append(member)
+            self.forward.append(training_forward(member['model'], self.precision))
+            self.retired.append(False)
+            self.tried.append(False)
+            self.totals.append([0, 0])
+            self.stats = torch.cat((self.stats, self.stats.new_zeros((1, 3))))
+            self.start_modes = torch.cat((self.start_modes, self.start_modes.new_tensor([STARTS[member.get('starts', 'mixed')]])))
+            added += 1
+        if added:
+            self.draw()
 
     def rebind(self, env):
         self.env = env
