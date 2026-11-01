@@ -2,6 +2,7 @@
 # mask have been reset to kickoff; the mask may contain no true values.
 # With LeaguePool, env.opponents.pending identifies the next opponent per arena;
 # -1 means the current policy. Read it in the callback, not in this factory.
+# env.seed is rank-specific and changes when an environment is rebuilt.
 def make_state_setter(env):
     return lambda reset: None
 

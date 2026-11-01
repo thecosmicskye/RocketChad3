@@ -133,7 +133,8 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
     rollout_forward = chunked_rollout_forward(rollout_forward, config.get('rollout_forward_rows', 0))
 
     def make_environment(*, initialize=True):
-        env = Environment(config, example, config['seed'] + rank * 1000003, device, initialize=initialize)
+        env = Environment(config, example, config['seed'] + rank * 1000003, device,
+                          initialize=initialize, generation=updates)
         if config.get('compile_obs', False):
             env.observe = torch.no_grad()(torch.compile(env.observe, dynamic=False,
                                                        options={'triton.cudagraphs': False}))

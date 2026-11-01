@@ -4,10 +4,11 @@ import torch
 
 
 class Environment:
-    def __init__(self, config, example, seed, device, *, initialize=True):
+    def __init__(self, config, example, seed, device, *, initialize=True, generation=0):
         self.config = config
         self.arenas = config['arenas']
-        self.tick_skip, self.device, self.seed = config['tick_skip'], torch.device(device), seed
+        self.tick_skip, self.device = config['tick_skip'], torch.device(device)
+        self.seed = seed if not generation else (seed + generation * 1000000007) & ((1 << 63) - 1)
         self.team_layout = None
         fractions = config.get('team_size_fractions')
         if fractions is not None:
@@ -47,7 +48,7 @@ class Environment:
             for state in states:
                 state.car_visit_order_mode = 0
             self.sim.upload_env_states(states, self.stream)
-        self.sim.reset_to_kickoff(seed, self.stream)
+        self.sim.reset_to_kickoff(self.seed, self.stream)
 
         def fields(name):
             return {key: torch.as_tensor(value, device=self.device) for key, value in views.field_arrays(self.sim, name).items()}
@@ -67,7 +68,7 @@ class Environment:
         self.episode_steps = round(config['episode_seconds'] * 120 / self.tick_skip)
         self.age = torch.zeros(self.arenas, dtype=torch.int64, device=self.device)
         self.goal_inside = torch.zeros(self.arenas, dtype=torch.bool, device=self.device)
-        generator = torch.Generator(device=self.device).manual_seed(seed)
+        generator = torch.Generator(device=self.device).manual_seed(self.seed)
         self.timeouts = torch.randint(1, self.episode_steps + 1, (self.arenas,), generator=generator, device=self.device)
         self.reset_count = torch.zeros_like(self.age)
         self.env_ids = torch.arange(self.arenas, device=self.device, dtype=torch.int64)
