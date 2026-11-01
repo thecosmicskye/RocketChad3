@@ -10,18 +10,13 @@ import torch
 import torch.distributed as dist
 
 from .environment import Environment
-from .learner import Learner, Optimizers, forward
+from .distributed_ppo import normalize_advantages
+from .inference import chunked_rollout_forward
+from .learner import Learner, Optimizers
+from .precision import training_forward
+from .rollout_graph import RolloutGraph
 
-
-def normalize(advantages, world):
-    values = advantages.double()
-    moments = torch.stack((values.sum(), values.square().sum(), values.new_tensor(values.numel())))
-    if world > 1:
-        dist.all_reduce(moments)
-    total, squares, count = moments.unbind()
-    mean = total / count
-    variance = ((squares - total * mean) / (count - 1).clamp_min(1)).clamp_min(0)
-    return ((values - mean) / variance.sqrt().clamp_min(1e-8)).float()
+FUSED_AUTOTUNE = dict(max_autotune=True, coordinate_descent_tuning=True, benchmark_epilogue_fusion=False)
 
 
 def checkpoint(path, model, optimizer, config, phase_index, phase_updates, phase_seconds, updates, steps, elapsed, device, world):
@@ -49,6 +44,8 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
     world = int(os.environ.get('WORLD_SIZE', '1'))
     device = torch.device('cuda', local_rank)
     torch.cuda.set_device(device)
+    if config.get('rollout_graph', False):
+        torch.cuda.set_stream(torch.cuda.Stream(device=device))
     if world > 1:
         os.environ['TORCH_NCCL_ASYNC_ERROR_HANDLING'] = '0'
         dist.init_process_group('nccl', device_id=device)
@@ -76,8 +73,27 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
         torch.cuda.set_rng_state(state['rng'][rank]['cuda'], device)
     else:
         torch.manual_seed(config['seed'] + rank)
-    learner = Learner(model, optimizer, config, critic_parameters(model), world)
-    env = Environment(config, example, config['seed'] + rank * 1000003, device)
+    shared = model
+    if config.get('graphed_compile', False):
+        import torch._dynamo as dynamo
+        dynamo.config.optimize_ddp = False
+        options = dict(options=FUSED_AUTOTUNE) if config.get('rollout_compile', False) else dict(mode='default')
+        shared = torch.compile(model, fullgraph=True, dynamic=False, **options)
+    learner = Learner(model, optimizer, config, critic_parameters(model), world, shared=shared)
+    rollout_forward = training_forward(model, config['precision'])
+    if config.get('rollout_compile', False):
+        rollout_forward = torch.compile(rollout_forward, dynamic=True, options=FUSED_AUTOTUNE)
+    rollout_forward = chunked_rollout_forward(rollout_forward, config.get('rollout_forward_rows', 0))
+
+    def make_environment():
+        env = Environment(config, example, config['seed'] + rank * 1000003, device)
+        if config.get('compile_obs', False):
+            env.observe = torch.no_grad()(torch.compile(env.observe, dynamic=False,
+                                                       options={'triton.cudagraphs': False}))
+        return env
+
+    env = make_environment()
+    rollout_graph = RolloutGraph((env,), env) if config.get('rollout_graph', False) else None
     if rank == 0:
         output.mkdir(parents=True, exist_ok=True)
     if world > 1:
@@ -102,6 +118,7 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
             transition, save, stop = decision.tolist()
             if transition:
                 learner.close()
+                rollout_graph = None
                 env.close()
                 phase_index += 1
                 phase_updates = 0
@@ -113,8 +130,9 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
                         for parameter in critic_parameters(model):
                             parameter.zero_()
                 optimizer = build_optimizer()
-                learner = Learner(model, optimizer, config, critic_parameters(model), world)
-                env = Environment(config, example, config['seed'] + rank * 1000003, device)
+                learner = Learner(model, optimizer, config, critic_parameters(model), world, shared=shared)
+                env = make_environment()
+                rollout_graph = RolloutGraph((env,), env) if config.get('rollout_graph', False) else None
                 obs = env.observe()
                 phase_elapsed = 0.0
             if save or stop:
@@ -131,17 +149,29 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
             dones = torch.empty_like(log_probs, dtype=torch.bool)
             iteration_started = time.monotonic()
             with torch.no_grad():
-                for index in range(horizon):
-                    observations[index].copy_(obs)
-                    logits, value = forward(model, obs, config['precision'])
+                if rollout_graph is not None:
+                    rollout_graph.begin()
+
+                def decide():
+                    nonlocal obs
+                    logits, value = rollout_forward(obs)
                     log_all = logits.log_softmax(-1)
                     probabilities = log_all.exp()
                     action = probabilities.div(torch.empty_like(probabilities).exponential_()).argmax(-1)
-                    obs, reward_value, done = env.step(action, phase['name'])
+                    following, reward_value, done = env.step(action, phase['name'])
+                    if rollout_graph is None:
+                        obs = following
+                    else:
+                        obs.copy_(following)
+                    return action, log_all.gather(-1, action[:, None]).squeeze(-1), value, reward_value, done
+
+                for index in range(horizon):
+                    observations[index].copy_(obs)
+                    action, log_prob, value, reward_value, done = decide() if rollout_graph is None else rollout_graph(decide)
                     actions[index] = action
-                    log_probs[index] = log_all.gather(-1, action[:, None]).squeeze(-1)
+                    log_probs[index] = log_prob
                     values[index], rewards[index], dones[index] = value, reward_value, done
-                _, next_value = forward(model, obs, config['precision'])
+                _, next_value = rollout_forward(obs)
                 advantages = torch.empty_like(rewards)
                 running = torch.zeros(rows, device=device)
                 for index in reversed(range(horizon)):
@@ -151,7 +181,7 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
                     advantages[index] = running
                     next_value = values[index]
                 returns = advantages + values
-                advantages = normalize(advantages, world)
+                advantages = normalize_advantages(advantages)
             torch.cuda.synchronize(device)
             collection_end = time.monotonic()
             sources = (observations.flatten(0, 1), actions.flatten(), log_probs.flatten(),
@@ -180,6 +210,7 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
                                       policy_loss=policy_loss, value_loss=value_loss, entropy=entropy, approx_kl=kl)), flush=True)
     finally:
         learner.close()
+        rollout_graph = None
         env.close()
         if world > 1:
             dist.destroy_process_group()

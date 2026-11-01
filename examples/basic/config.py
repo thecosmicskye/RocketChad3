@@ -15,10 +15,13 @@ from rewards import reward
 # def make_state_setter(env):
 #     return ReplayStarts(env, 'replay_states.pt', fraction=0.5)
 
-# Arena and minibatch sizes are per GPU.
+# Arena and minibatch sizes are per GPU. Rollout graphs replay GPU operations,
+# so custom callbacks used with them should not depend on Python side effects.
 CONFIG = {
     'arenas': 8192, 'team_size': 3, 'tick_skip': 8, 'episode_seconds': 30,
-    'minibatch': 8192, 'epochs': 1, 'clip': 0.2, 'entropy': 0.0,
+    'minibatch': 8192, 'microbatch': 0, 'epochs': 1, 'clip': 0.2, 'entropy': 0.0,
+    'graphed_compile': False, 'rollout_compile': False, 'rollout_graph': False,
+    'rollout_forward_rows': 0, 'compile_obs': False,
     'optimizer': 'muon', 'adam_lr': 0.0003, 'adamw_lr': 0.0003, 'muon_lr': 0.001, 'optimizer_eps': 1e-5,
     'muon_momentum': 0.95, 'muon_ns_steps': 5, 'weight_decay': 0.0,
     'precision': 'bf16', 'seed': 1, 'checkpoint_seconds': 600, 'seconds': 0,
