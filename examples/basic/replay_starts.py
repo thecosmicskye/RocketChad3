@@ -20,6 +20,11 @@
 # cars, balls, configs, pads = public_states(sample_cache('starts.bin', 4096, default_rng(1)))
 # def make_state_setter(env):
 #     return NativeReplayStarts(env, cars, balls, configs, pads, fraction=0.5)
+# For open-play jitter, eligibility comes from the cache's .receipt.json sidecar:
+# rows, eligible = sample_cache('starts.bin', 4096, default_rng(1), return_eligibility=True)
+# cars, balls, configs, pads = public_states(rows)
+# Then pass jitter_rows=rows and jitter_eligible=eligible to NativeReplayStarts.
+# Omitting jitter_eligible allows every row. Jitter RNG restarts on resume.
 
 import rocketgpu_py_cuda as views
 import torch

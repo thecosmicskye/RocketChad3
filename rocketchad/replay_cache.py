@@ -1,4 +1,6 @@
+import json
 import math
+from pathlib import Path
 import struct
 import numpy as np
 PHYS = 18
@@ -52,10 +54,44 @@ def decode(state):
     return dict(tick=s[0], blue_score=s[1], orange_score=s[2], ball=ball, pads=pads, cars=cars)
 
 
-def sample_cache(path, count, rng):
+def choose_ranges(sources, rows, rng, target_kickoff=None):
+    lengths = np.array([s['end_row'] - s['first_row'] for s in sources])
+    mass = lengths * np.array([s['sampling_weight'] for s in sources], dtype=float)
+    if target_kickoff is not None:
+        kickoff = np.array([s['row_kind'] == 'kickoff' for s in sources])
+        for mask, fraction in ((kickoff, target_kickoff), (~kickoff, 1 - target_kickoff)):
+            total = mass[mask].sum()
+            if total:
+                mass[mask] *= fraction / total
+    count = min(rows, int(lengths.sum()))
+    quotas = np.minimum((count * mass / mass.sum()).astype(int), lengths)
+    while quotas.sum() < count:
+        available = lengths > quotas
+        probability = mass * available
+        if not probability.sum():
+            probability = available.astype(float)
+        quotas[rng.choice(len(sources), p=probability / probability.sum())] += 1
+    chosen, eligible = [], []
+    for source, quota, length in zip(sources, quotas, lengths):
+        chosen.append(source['first_row'] + rng.choice(int(length), int(quota), replace=False))
+        eligible.append(np.full(int(quota), source['row_kind'] == 'open_play' and source['jitter_eligible']))
+    chosen, eligible = np.concatenate(chosen), np.concatenate(eligible)
+    order = rng.permutation(count)
+    return chosen[order], eligible[order]
+
+
+
+def sample_cache(path, count, rng, *, return_eligibility=False):
     _, data = read_cache(path)
-    indices = rng.choice(len(data), min(count, len(data)), replace=False)
-    return data[indices]
+    sidecar = Path(str(path) + '.receipt.json')
+    metadata = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+    if metadata.get('kind') == 'merged_replay_start_cache_v2':
+        indices, eligible = choose_ranges(metadata['sources'], count, rng,
+                                          metadata.get('sampling_mix', {}).get('target_1hz_kickoff_fraction'))
+    else:
+        indices = rng.choice(len(data), min(count, len(data)), replace=False)
+        eligible = np.zeros(len(indices), dtype=bool)
+    return (data[indices], eligible) if return_eligibility else data[indices]
 
 def public_states(rows):
     import rocketgpu_py as rs
