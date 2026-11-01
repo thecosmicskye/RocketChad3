@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+build/
+runs/
+output/
+*.pt
+*.pt2
+*.pth
+*.so
+*.dylib
+*.o
+*.a
+.venv/
+.ruff_cache/
+*.egg-info/

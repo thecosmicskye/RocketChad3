@@ -1,0 +1,30 @@
+from actions import action_table
+from episode import make_state_setter, terminal_condition
+from model import make_model, critic_parameters
+from observations import Observation
+from optimizer import make_optimizer
+from rewards import reward
+
+# Optional: start with the ball 600 units above the field.
+# from episode import high_ball_start as make_state_setter
+# Optional: also end an episode if the ball goes above 1,500 units.
+# from episode import end_when_ball_high as terminal_condition
+
+# Or start half of episodes from converted replay states; see replay_starts.py:
+# from replay_starts import ReplayStarts
+# def make_state_setter(env):
+#     return ReplayStarts(env, 'replay_states.pt', fraction=0.5)
+
+# Arena and minibatch sizes are per GPU.
+CONFIG = {
+    'arenas': 8192, 'team_size': 3, 'tick_skip': 8, 'episode_seconds': 30,
+    'minibatch': 8192, 'epochs': 1, 'clip': 0.2, 'entropy': 0.0,
+    'optimizer': 'muon', 'adam_lr': 0.0003, 'adamw_lr': 0.0003, 'muon_lr': 0.001, 'optimizer_eps': 1e-5,
+    'muon_momentum': 0.95, 'muon_ns_steps': 5, 'weight_decay': 0.0,
+    'precision': 'bf16', 'seed': 1, 'checkpoint_seconds': 600, 'seconds': 0,
+    # Train fresh weights with ball-velocity rewards for 60 seconds, then goals/concedes.
+    'phases': [
+        {'name': 'velocity', 'seconds': 60, 'horizon': 4, 'gamma': 0.99, 'gae_lambda': 0.95, 'critic_burnin': 0},
+        {'name': 'goals', 'seconds': 0, 'horizon': 32, 'gamma': 0.999, 'gae_lambda': 0.99, 'critic_burnin': 16, 'reset_critic': True},
+    ],
+}
