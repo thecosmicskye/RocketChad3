@@ -2,6 +2,7 @@ from actions import action_table
 from episode import make_state_setter, terminal_condition
 from model import make_model, critic_parameters
 from observations import Observation
+from opponents import make_opponents
 from optimizer import make_optimizer
 from rewards import reward
 
@@ -21,6 +22,9 @@ from rewards import reward
 # are 3v3 arenas. Custom observations and rewards should return six rows per
 # arena; env.team_layout identifies active slots and env.logical_car_field
 # maps car data into blue-three, orange-three order.
+# To train against saved policies, add 'opponents': [{'path': 'checkpoint.pt',
+# 'team_size': 3, 'retry': True}] and 'league_fraction': 0.25. The fraction
+# counts arenas; the learner controls one team in those arenas.
 # Multi-GPU models must use every optimized parameter on every rank.
 # To use standard DDP, set 'grad_reduce': 'ddp', leave microbatch at 0, and use
 # every trainable parameter on every rank.

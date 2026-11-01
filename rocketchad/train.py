@@ -29,8 +29,11 @@ from .truncation_gae import TimeoutValues, gae as truncation_gae
 FUSED_AUTOTUNE = dict(max_autotune=True, coordinate_descent_tuning=True, benchmark_epilogue_fusion=False)
 
 
-def checkpoint(path, model, optimizer, config, phase_index, phase_updates, phase_seconds, updates, steps, elapsed, device, world, entropy_band=None):
+def checkpoint(path, model, optimizer, config, phase_index, phase_updates, phase_seconds, updates, steps, elapsed, device, world, entropy_band=None, opponents=None):
     state = {'cpu': torch.get_rng_state(), 'cuda': torch.cuda.get_rng_state(device).cpu()}
+    if opponents is not None:
+        state['opponents'] = opponents.state_dict()
+        state['opponent_fraction'] = config.get('league_fraction', 0.25 if config.get('opponents') else 0)
     states = [None] * world
     if world > 1:
         dist.all_gather_object(states, state)
@@ -42,12 +45,13 @@ def checkpoint(path, model, optimizer, config, phase_index, phase_updates, phase
         torch.save(dict(model=model.state_dict(), optimizer=optimizer.state_dict(), config=saved_config,
                         phase_index=phase_index, phase_updates=phase_updates, phase_seconds=phase_seconds,
                         updates=updates, player_steps=steps, elapsed_seconds=elapsed, rng=states,
-                        entropy_band=None if entropy_band is None else entropy_band.state_dict()), temporary)
+                        entropy_band=None if entropy_band is None else entropy_band.state_dict(),
+                        opponent_models=None if opponents is None else opponents.model_state_dict()), temporary)
         os.replace(temporary, path)
 
 
 def train(config, output, *, make_model, action_table, Observation, reward, make_state_setter, terminal_condition,
-          make_optimizer, critic_parameters, resume=None):
+          make_optimizer, critic_parameters, make_opponents=None, resume=None):
     config = dict(config)
     example = dict(action_table=action_table, Observation=Observation, reward=reward,
                    make_state_setter=make_state_setter, terminal_condition=terminal_condition)
@@ -68,7 +72,7 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
             dist.init_process_group('nccl', device_id=device)
             group_initialized = True
         return _train(config, output, example, rank, world, device, make_model, make_optimizer,
-                      critic_parameters, resume)
+                      critic_parameters, make_opponents, resume)
     finally:
         try:
             if group_initialized:
@@ -78,7 +82,7 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
                 torch.cuda.set_stream(original_stream)
 
 
-def _train(config, output, example, rank, world, device, make_model, make_optimizer, critic_parameters, resume):
+def _train(config, output, example, rank, world, device, make_model, make_optimizer, critic_parameters, make_opponents, resume):
     entropy_band = EntropyBand(config, device) if config.get('entropy_band') else None
     if entropy_band is not None:
         config['_entropy_tensor'] = entropy_band.tensor
@@ -135,16 +139,24 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                                                        options={'triton.cudagraphs': False}))
         return env
 
-    def player_rows(env):
+    def player_rows(env, opponents):
         full = env.arenas * env.players
-        active = None if env.team_layout is None else env.team_layout.present.flatten().nonzero().flatten()
+        active = opponents.learner_indices if opponents is not None else (
+            None if env.team_layout is None else env.team_layout.present.flatten().nonzero().flatten())
         return full, active, full if active is None else active.numel()
 
+    saved_opponents = state['rng'][rank].get('opponents') if resume else None
+    if saved_opponents is not None:
+        config['league_fraction'] = state['rng'][rank]['opponent_fraction']
     env = make_environment()
+    opponents = None if make_opponents is None else make_opponents(env, model, config, saved_opponents)
+    if saved_opponents is not None and opponents is not None:
+        opponents.load_state_dict(saved_opponents)
+        opponents.load_model_state_dict(state['opponent_models'])
     rollout_graph = None
     host_observations = None
     try:
-        rollout_graph = RolloutGraph((env,), env) if config.get('rollout_graph', False) else None
+        rollout_graph = RolloutGraph((env, opponents), env) if config.get('rollout_graph', False) else None
         if rank == 0:
             output.mkdir(parents=True, exist_ok=True)
         if world > 1:
@@ -152,7 +164,7 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
         started = phase_started = time.monotonic()
         next_save = config['checkpoint_seconds']
         obs = env.observe()
-        full_rows, active, rows = player_rows(env)
+        full_rows, active, rows = player_rows(env, opponents)
         timeout_values = None
         while True:
             now = time.monotonic()
@@ -173,7 +185,8 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                 if host_observations is not None:
                     host_observations.close()
                     host_observations = None
-                env.close()
+                if opponents is None:
+                    env.close()
                 phase_index += 1
                 phase_updates = 0
                 phase_previous_seconds = 0.0
@@ -185,19 +198,22 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                             parameter.zero_()
                 optimizer = build_optimizer()
                 learner = Learner(model, optimizer, config, critic_parameters(model), world, shared=shared, stream=learner_stream)
-                env = make_environment()
-                rollout_graph = RolloutGraph((env,), env) if config.get('rollout_graph', False) else None
-                obs = env.observe()
-                full_rows, active, rows = player_rows(env)
+                if opponents is None:
+                    env = make_environment()
+                    obs = env.observe()
+                rollout_graph = RolloutGraph((env, opponents), env) if config.get('rollout_graph', False) else None
+                full_rows, active, rows = player_rows(env, opponents)
                 timeout_values = None
                 phase_elapsed = 0.0
             if save or stop:
                 checkpoint(output / f'checkpoint_{updates}.pt', model, optimizer, config, phase_index, phase_updates,
-                           phase_elapsed, updates, steps, previous_seconds + elapsed, device, world, entropy_band)
+                           phase_elapsed, updates, steps, previous_seconds + elapsed, device, world, entropy_band, opponents)
                 next_save = elapsed + config['checkpoint_seconds']
             if stop:
                 break
             horizon = phase['horizon']
+            if opponents is not None:
+                opponents.begin_rollout(updates)
             if config.get('rollout_host_obs', False):
                 if host_observations is None:
                     host_observations = HostObservations(horizon, rows, obs.shape[-1], None, device, config['minibatch'])
@@ -226,11 +242,16 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                     probabilities = log_all.exp()
                     action = probabilities.div(torch.empty_like(probabilities).exponential_()).argmax(-1)
                     applied = action if active is None else action.new_zeros(full_rows).index_copy_(0, active, action)
-                    if timeout_values is None:
+                    if opponents is not None:
+                        applied = opponents.override_actions(obs, applied, rollout_forward)
+                    if timeout_values is None and opponents is None:
                         following, reward_value, done = env.step(applied, phase['name'])
                         info = None
                     else:
-                        following, reward_value, done, info = env.step(applied, phase['name'], capture_transition=True)
+                        following, reward_value, done, info = env.step(applied, phase['name'],
+                            capture_transition=timeout_values is not None, capture_info=opponents is not None)
+                    if opponents is not None:
+                        opponents.on_step(done.reshape(env.arenas, env.players)[:, 0], info)
                     if active is not None:
                         reward_value, done = reward_value.index_select(0, active), done.index_select(0, active)
                     if rollout_graph is None:
@@ -303,6 +324,7 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
             entropy_weight = entropy_band.weight if entropy_band is not None else None
             if entropy_band is not None:
                 entropy_band.update(mean_metrics[2].item())
+            opponent_metrics = None if opponents is None else opponents.end_rollout(world)
             if rank == 0:
                 total_seconds = time.monotonic() - iteration_started
                 policy_loss, value_loss, entropy, kl = mean_metrics.tolist()
@@ -314,6 +336,8 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                 if entropy_band is not None:
                     metrics_row.update(entropy_weight=entropy_weight, entropy_weight_next=entropy_band.weight,
                                        entropy_ema=entropy_band.ema)
+                if opponent_metrics is not None:
+                    metrics_row['opponents'] = opponent_metrics
                 print(json.dumps(metrics_row), flush=True)
     finally:
         learner.close()
@@ -333,7 +357,8 @@ def main():
     example = runpy.run_path(str(args.config.resolve()))
     keys = ('make_model', 'action_table', 'Observation', 'reward', 'make_state_setter', 'terminal_condition',
             'make_optimizer', 'critic_parameters')
-    train(example['CONFIG'], args.out, **{key: example[key] for key in keys}, resume=args.resume)
+    train(example['CONFIG'], args.out, **{key: example[key] for key in keys},
+          make_opponents=example.get('make_opponents'), resume=args.resume)
 
 
 if __name__ == '__main__':

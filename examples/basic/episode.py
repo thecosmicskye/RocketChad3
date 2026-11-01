@@ -4,6 +4,7 @@ def make_state_setter(env):
     return lambda reset: None
 
 
+# Goal arguments mark new crossings in the current decision, not total scores.
 # Return one GPU boolean per arena for true terminal states. The trainer handles
 # timeouts separately, and bootstraps them if enabled in config.py.
 def terminal_condition(env, blue_goals, orange_goals):

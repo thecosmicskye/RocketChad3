@@ -13,16 +13,20 @@ class Environment:
         if fractions is not None:
             from .team_layout import TeamLayout, mixed_counts
             fractions = {int(key): value for key, value in fractions.items()}
-            counts = mixed_counts(self.arenas, fractions)
             generator = torch.Generator().manual_seed(seed)
-            pairs = torch.randperm(self.arenas // 2, generator=generator)
             sizes = torch.full((self.arenas,), 3, dtype=torch.int64)
-            offset = 0
-            for mode in (1, 2):
-                length = counts[mode] // 2
-                selected = (pairs[offset:offset + length, None] * 2 + torch.arange(2)).flatten()
-                sizes[selected] = mode
-                offset += length
+            default_fraction = 0.25 if config.get('opponents') else 0
+            league_count = 2 * round(self.arenas * config.get('league_fraction', default_fraction) / 2)
+            for start, count in ((0, self.arenas - league_count), (self.arenas - league_count, league_count)):
+                if count:
+                    counts = mixed_counts(count, fractions)
+                    pairs = torch.randperm(count // 2, generator=generator)
+                    offset = 0
+                    for mode in (1, 2):
+                        length = counts[mode] // 2
+                        selected = start + (pairs[offset:offset + length, None] * 2 + torch.arange(2)).flatten()
+                        sizes[selected] = mode
+                        offset += length
             self.team_layout = TeamLayout(sizes.to(self.device))
         self.players = 6 if self.team_layout is not None else 2 * config['team_size']
         self.stream = torch.cuda.current_stream(self.device).cuda_stream
@@ -30,6 +34,7 @@ class Environment:
         settings.env_count, settings.max_cars_per_env = self.arenas, self.players
         settings.enable_boost_pads = settings.enable_car_car_collisions = settings.enable_demos = settings.enable_scoring = 1
         settings.tick_dt = 1 / 120
+        self.goal_threshold = settings.mutator.goal_base_threshold_y + settings.mutator.ball_radius
         self.sim = rg.BatchSim(settings)
         if self.team_layout is None:
             self.sim.set_env_car_count([self.players] * self.arenas, self.stream)
@@ -61,6 +66,7 @@ class Environment:
         self.last_action = torch.zeros((self.arenas, self.players, 8), device=self.device)
         self.episode_steps = round(config['episode_seconds'] * 120 / self.tick_skip)
         self.age = torch.zeros(self.arenas, dtype=torch.int64, device=self.device)
+        self.goal_inside = torch.zeros(self.arenas, dtype=torch.bool, device=self.device)
         generator = torch.Generator(device=self.device).manual_seed(seed)
         self.timeouts = torch.randint(1, self.episode_steps + 1, (self.arenas,), generator=generator, device=self.device)
         self.reset_count = torch.zeros_like(self.age)
@@ -84,7 +90,9 @@ class Environment:
         result = self.team_layout.to_logical(shaped).reshape(value.shape)
         return result if signed is None else result.view(value.dtype)
 
-    def step(self, actions, phase, *, capture_transition=False):
+    def step(self, actions, phase, *, capture_transition=False, capture_info=False):
+        previous_blue = self.state['blue_score'].to(torch.int64)
+        previous_orange = self.state['orange_score'].to(torch.int64)
         controls = self.actions[actions]
         self.last_action.copy_(controls.reshape(self.arenas, self.players, 8))
         if self.team_layout is not None:
@@ -94,8 +102,10 @@ class Environment:
         if self.goal_telemetry is not None:
             self.goal_telemetry.begin()
         self.sim.step(self.tick_skip, self.stream)
-        blue = self.state['blue_score'].to(torch.int64) > 0
-        orange = self.state['orange_score'].to(torch.int64) > 0
+        blue_score = self.state['blue_score'].to(torch.int64)
+        orange_score = self.state['orange_score'].to(torch.int64)
+        blue = (blue_score > previous_blue) & ~self.goal_inside
+        orange = (orange_score > previous_orange) & ~self.goal_inside
         if self.goal_telemetry is not None:
             self.goal_events = self.goal_telemetry.read(blue | orange)
         reward = self.reward(self, blue, orange, phase)
@@ -103,9 +113,11 @@ class Environment:
         terminal = self.terminal_condition(self, blue, orange)
         timeout = (self.age >= self.timeouts) & ~terminal
         done = terminal | timeout
-        if capture_transition:
-            info = dict(timeout=timeout, blue_goals=blue, orange_goals=orange,
-                        transition_observation=self.observe().clone())
+        self.goal_inside.copy_((self.ball['pos'][:, 1].abs() > self.goal_threshold) & ~done)
+        if capture_transition or capture_info:
+            info = dict(timeout=timeout, blue_goals=blue, orange_goals=orange)
+            if capture_transition:
+                info['transition_observation'] = self.observe().clone()
         self.reset_count.add_(done)
         self.commands[:, 0] = done.to(torch.int64) * ((1 << 0) | (1 << 8) | (1 << 16))
         self.commands[:, 1] = (self.seed + self.env_ids * 1000003 + self.reset_count * 9176) & 9223372036854775807
@@ -115,7 +127,7 @@ class Environment:
         self.last_action.masked_fill_(done[:, None, None], 0)
         self.set_state(done)
         result = (self.observe(), reward, done.repeat_interleave(self.players))
-        return (*result, info) if capture_transition else result
+        return (*result, info) if capture_transition or capture_info else result
 
     def close(self):
         torch.cuda.synchronize(self.device)
