@@ -137,6 +137,7 @@ class Environment:
     def close(self):
         torch.cuda.synchronize(self.device)
         self.set_state = None
+        self.opponents = None
         for fields in (self.car, self.ball, self.pads, self.state, self.controls):
             fields.clear()
         self.goal_events = self.goal_telemetry = None

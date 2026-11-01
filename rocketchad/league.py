@@ -83,6 +83,19 @@ class LeaguePool:
             if dist.is_initialized():
                 dist.all_reduce(presence)
         active = {i for i, count in enumerate(presence.cpu().tolist()) if count}
+        keep = [i for i, member in enumerate(self.members) if member['key'] not in self.beaten or i in active]
+        if len(keep) != len(self.members):
+            remap = self.active.new_full((len(self.members),), -1)
+            remap[keep] = torch.arange(len(keep), device=self.env.device)
+            self.active.copy_(torch.where(self.active >= 0, remap[self.active.clamp(min=0)], -1))
+            self.members = [self.members[i] for i in keep]
+            self.forward = [self.forward[i] for i in keep]
+            self.retired = [self.retired[i] for i in keep]
+            self.tried = [self.tried[i] for i in keep]
+            self.totals = [self.totals[i] for i in keep]
+            self.stats = self.stats[keep]
+            self.start_modes = self.start_modes[[0] + [i + 1 for i in keep]]
+            active = {new for new, old in enumerate(keep) if old in active}
         pending = torch.full((self.env.arenas,), -1, dtype=torch.int64)
         for mode in (1, 2, 3):
             arenas = [arena for arena, size in enumerate(modes) if league[arena] and size == mode]
@@ -166,14 +179,16 @@ class LeaguePool:
                     for j, member in enumerate(self.members):
                         if member['key'] == key:
                             self.retired[j] = True
-        waiting_retry = any(self.retired[i] and member.get('retry', False) and member['key'] not in self.beaten
-                            for i, member in enumerate(self.members))
-        if changed or waiting_retry or (self.resample_updates and self.updates % self.resample_updates == 0):
+        result = [dict(name=member.get('name', str(i)), goals_for=self.totals[i][0],
+                       goals_against=self.totals[i][1],
+                       goal_share=self.totals[i][0] / sum(self.totals[i]) if sum(self.totals[i]) else None,
+                       retired=self.retired[i]) for i, member in enumerate(self.members)]
+        waiting = any(self.retired[i] and member.get('retry', False) and member['key'] not in self.beaten
+                      for i, member in enumerate(self.members))
+        waiting |= not self.resample_updates and any(member['key'] in self.beaten for member in self.members)
+        if changed or waiting or (self.resample_updates and self.updates % self.resample_updates == 0):
             self.draw()
-        return [dict(name=member.get('name', str(i)), goals_for=self.totals[i][0],
-                     goals_against=self.totals[i][1],
-                     goal_share=self.totals[i][0] / sum(self.totals[i]) if sum(self.totals[i]) else None,
-                     retired=self.retired[i]) for i, member in enumerate(self.members)]
+        return result
 
     def state_dict(self):
         return dict(pending=self.pending.cpu(), retired=self.retired,

@@ -27,7 +27,7 @@ from rocketchad.league import LeaguePool
 # same number of learner_indices.
 def make_opponents(env, model, config, saved_state=None):
     entries = config.get('opponents', ()) if saved_state is None else saved_state['members']
-    if not entries:
+    if not entries and saved_state is None:
         return None
     members = []
     for entry in entries:
