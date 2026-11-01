@@ -124,7 +124,10 @@ class SymmetricAttentionActorCritic(nn.Module):
 
 
 def make_model():
-    return SymmetricAttentionActorCritic(EntityAttentionActorCritic(width=256, depth=2, act='gelu'))
+    model = SymmetricAttentionActorCritic(EntityAttentionActorCritic(width=256, depth=2, act='gelu'))
+    # To start a new run from saved weights with a fresh optimizer:
+    # model.load_state_dict(torch.load('checkpoint.pt', map_location='cpu', weights_only=True)['model'])
+    return model
 
 
 def muon_parameters(model):
