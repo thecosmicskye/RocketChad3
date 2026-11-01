@@ -23,6 +23,11 @@ class Environment:
 
         self.car, self.ball = fields('car_states'), fields('ball_states')
         self.pads, self.state, self.controls = fields('boost_pad_states'), fields('env_states'), fields('controls')
+        self.goal_telemetry = None
+        self.goal_events = None
+        if config.get('goal_telemetry', False):
+            from .goal_telemetry import GoalTelemetry
+            self.goal_telemetry = GoalTelemetry(self.sim, self.device, self.tick_skip)
         self.actions = example['action_table'](self.device)
         self.observation = example['Observation'](self)
         self.reward = example['reward']
@@ -47,9 +52,13 @@ class Environment:
         self.last_action.copy_(controls.reshape(self.arenas, self.players, 8))
         for index, name in enumerate(('throttle', 'steer', 'pitch', 'yaw', 'roll', 'jump', 'boost', 'handbrake')):
             self.controls[name].copy_(controls[:, index])
+        if self.goal_telemetry is not None:
+            self.goal_telemetry.begin()
         self.sim.step(self.tick_skip, self.stream)
         blue = self.state['blue_score'].to(torch.int64) > 0
         orange = self.state['orange_score'].to(torch.int64) > 0
+        if self.goal_telemetry is not None:
+            self.goal_events = self.goal_telemetry.read(blue | orange)
         reward = self.reward(self, blue, orange, phase)
         self.age.add_(1)
         terminal = self.terminal_condition(self, blue, orange)
@@ -74,4 +83,5 @@ class Environment:
         self.set_state = None
         for fields in (self.car, self.ball, self.pads, self.state, self.controls):
             fields.clear()
+        self.goal_events = self.goal_telemetry = None
         self.sim = None

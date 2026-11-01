@@ -19,6 +19,7 @@ from rewards import reward
 # so custom callbacks used with them should not depend on Python side effects.
 # Multi-GPU models must use every optimized parameter on every rank.
 # rollout_host_obs stores rollout observations in BF16 host memory.
+# Set 'goal_telemetry': True to expose env.goal_events in rewards.
 # Optional entropy control: set a positive entropy and add
 # 'entropy_band': {'low': 1, 'high': 2, 'up': 1.0001, 'down': 0.99995,
 #                  'ema_updates': 20, 'clamp': 4} to CONFIG.
