@@ -22,6 +22,8 @@ from rewards import reward
 # are 3v3 arenas. Custom observations and rewards should return six rows per
 # arena; env.team_layout identifies active slots and env.logical_car_field
 # maps car data into blue-three, orange-three order.
+# Set 'team_pad_frame': True to orient boost-pad states to each team's view.
+# Use the same setting as resumed checkpoints and opponents.
 # To train against saved policies, add 'opponents': [{'path': 'checkpoint.pt',
 # 'team_size': 3, 'retry': True}] and 'league_fraction': 0.25. The fraction
 # counts arenas; the learner controls one team in those arenas. See opponents.py
