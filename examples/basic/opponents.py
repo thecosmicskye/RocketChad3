@@ -14,9 +14,11 @@ from rocketchad.league import LeaguePool
 # Each member's key is its checkpoint file's SHA-256; use the same key for the
 # same file even when adding it under a different name or path.
 # With a replay state setter enabled, set starts to 'kickoff' or 'replay' to
-# override its replay fraction for that opponent. Supply replay frames for every
-# mode; missing modes fall back to kickoff. Use open-play frames to exclude
-# kickoffs. The default is 'mixed'.
+# override its replay fraction for that opponent. Replay-only opponents need
+# frames for their mode; without them those slots use the current policy.
+# Use open-play frames to exclude kickoffs. The default is 'mixed'. A custom
+# state setter must expose replay_modes as a set of supported team sizes.
+# After changing modes, call pool.draw() on all ranks between rollouts.
 # Reserved arenas train one side, including when they fall back to self-play.
 # Add the same members on all ranks between rollouts with add_member; metadata
 # must use basic Python types. model_factory recreates added models on resume.

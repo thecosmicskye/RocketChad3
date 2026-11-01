@@ -58,17 +58,23 @@ class ReplayStarts:
         self.arrays = _state_arrays(env)
         self.frames = torch.load(path, map_location=env.device, weights_only=True)
         self.count = len(self.frames['ball_states'])
-        self.team_sizes = (env.team_layout.sizes if env.team_layout is not None else
-                           torch.full((self.arenas,), env.players // 2, device=self.device)
+        self.team_sizes = ((env.team_layout.sizes if env.team_layout is not None else
+                            torch.full((self.arenas,), env.players // 2, device=self.device))
                            if 'team_sizes' in self.frames else None)
         self.mode_rows = None if self.team_sizes is None else {
             mode: (self.frames['team_sizes'] == mode).nonzero().flatten()
             for mode in (1, 2, 3)
         }
+        self.replay_modes = ({env.players // 2} if self.mode_rows is None and self.count else
+                             {mode for mode, rows in (self.mode_rows or {}).items() if rows.numel()})
 
     def __call__(self, reset):
+        if not self.count:
+            return
         selected = replay_mask(self.env, reset, torch.rand(self.arenas, device=self.device) < self.fraction)
         if self.mode_rows is None:
+            if self.env.team_layout is not None:
+                selected &= self.env.team_layout.sizes == self.env.players // 2
             rows = torch.randint(self.count, (self.arenas,), device=self.device)
         else:
             rows = torch.zeros(self.arenas, dtype=torch.int64, device=self.device)

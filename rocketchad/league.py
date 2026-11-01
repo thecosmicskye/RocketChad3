@@ -74,15 +74,22 @@ class LeaguePool:
         self.arena_modes = (torch.full((env.arenas,), env.players // 2, dtype=torch.int64, device=env.device)
                             if env.team_layout is None else env.team_layout.sizes)
 
+    def supports_start(self, member):
+        return member.get('starts', 'mixed') != 'replay' or member.get('team_size', 3) in self.replay_modes
+
     def draw(self):
         modes = self.arena_modes.cpu().tolist()
         league = self.league_mask.cpu().tolist()
-        presence = torch.zeros(len(self.members), dtype=torch.int32, device=self.env.device)
+        presence = torch.zeros(len(self.members) + 3, dtype=torch.int32, device=self.env.device)
         if self.members:
-            presence.scatter_add_(0, self.active.clamp(min=0), (self.active >= 0).to(torch.int32))
-            if dist.is_initialized():
-                dist.all_reduce(presence)
-        active = {i for i, count in enumerate(presence.cpu().tolist()) if count}
+            presence[:len(self.members)].scatter_add_(0, self.active.clamp(min=0), (self.active >= 0).to(torch.int32))
+        local_modes = getattr(self.env.set_state, 'replay_modes', ())
+        presence[len(self.members):] = presence.new_tensor([int(mode not in local_modes) for mode in (1, 2, 3)])
+        if dist.is_initialized():
+            dist.all_reduce(presence)
+        counts = presence.cpu().tolist()
+        active = {i for i, count in enumerate(counts[:len(self.members)]) if count}
+        self.replay_modes = {mode for mode, missing in zip((1, 2, 3), counts[len(self.members):]) if not missing}
         keep = [i for i, member in enumerate(self.members) if member['key'] not in self.beaten or i in active]
         if len(keep) != len(self.members):
             remap = self.active.new_full((len(self.members),), -1)
@@ -100,7 +107,8 @@ class LeaguePool:
         for mode in (1, 2, 3):
             arenas = [arena for arena, size in enumerate(modes) if league[arena] and size == mode]
             matching = [i for i, member in enumerate(self.members)
-                        if member.get('team_size', 3) == mode and member['key'] not in self.beaten]
+                        if member.get('team_size', 3) == mode and member['key'] not in self.beaten
+                        and self.supports_start(member)]
             available = [i for i in matching if not self.retired[i] or
                          (self.members[i].get('retry', False) and i not in active)]
             if available and all(self.tried[i] for i in available):
@@ -214,6 +222,9 @@ class LeaguePool:
         self.stats = torch.zeros((len(self.members), 3), device=self.env.device)
         self.start_modes = torch.tensor([0] + [STARTS[m.get('starts', 'mixed')] for m in self.members], device=self.env.device)
         self.pending.copy_(state['pending'].to(self.env.device))
+        for i, member in enumerate(self.members):
+            if not self.supports_start(member):
+                self.pending.masked_fill_(self.pending == i, -1)
         self.active.copy_(self.pending)
         self.retired, self.tried, self.totals = state['retired'], state['tried'], state['totals']
         self.beaten = set(state['beaten'])

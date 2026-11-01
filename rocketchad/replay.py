@@ -16,8 +16,8 @@ class NativeReplayStarts:
         self.fraction = fraction
         rows = [i for i, row in enumerate(cars) if len(row) == env.players or
                 (env.team_layout is not None and len(row) in (2, 4, 6))]
-        self.cache = StartCache(*([values[i] for i in rows] for values in (cars, balls, configs, pads)),
-                                env.stream, env.sim.config)
+        self.cache = (StartCache(*([values[i] for i in rows] for values in (cars, balls, configs, pads)),
+                                 env.stream, env.sim.config) if rows else None)
         self.mode_rows = None
         if env.team_layout is not None:
             self.mode_rows = {}
@@ -25,6 +25,8 @@ class NativeReplayStarts:
                 indices = [j for j, row in enumerate(rows) if len(cars[row]) == 2 * mode]
                 if indices:
                     self.mode_rows[mode] = torch.tensor(indices, dtype=torch.int64, device=env.device)
+        self.replay_modes = (set(self.mode_rows) if self.mode_rows is not None else
+                             {env.players // 2} if rows else set())
         self.jitter = self.jitter_eligible = None
         if jitter_rows is not None:
             import numpy as np
@@ -55,6 +57,8 @@ class NativeReplayStarts:
         self.kickoff_configs = self.configs.clone()
 
     def __call__(self, reset):
+        if self.cache is None:
+            return
         sampled = torch.rand(self.env.arenas, device=self.env.device) < self.fraction
         self.selected.copy_(replay_mask(self.env, reset, sampled))
         if self.mode_rows is None:
