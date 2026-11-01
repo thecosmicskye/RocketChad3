@@ -2,6 +2,7 @@
 # ROCKETCHAD_RANK_CPU_PINNING=numa_local and ROCKETCHAD_CPUS_PER_RANK=8.
 # Use CUDA_DEVICE_ORDER=PCI_BUS_ID and integer CUDA_VISIBLE_DEVICES; set
 # ROCKETCHAD_RANK_CPU_SMT=1 to include sibling threads allowed by your cpuset.
+# The system PCI list must match CUDA's GPU ordinals, including in containers.
 # If your launcher already pins each rank, set ROCKETCHAD_RANK_CPUS_INHERIT=1.
 from rocketchad import train
 from config import (CONFIG, make_model, action_table, Observation, reward, make_state_setter,
