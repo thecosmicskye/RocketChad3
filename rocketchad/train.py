@@ -6,6 +6,12 @@ import sys
 import time
 from pathlib import Path
 
+if os.environ.get('ROCKETCHAD_RANK_CPU_PINNING') and os.environ.get('ROCKETCHAD_RANK_CPUS_INHERIT') != '1':
+    from .rank_cpus import rank_cpus
+    rank = int(os.environ.get('LOCAL_RANK', '0'))
+    local_world = int(os.environ.get('LOCAL_WORLD_SIZE', os.environ.get('WORLD_SIZE', rank + 1)))
+    os.sched_setaffinity(0, rank_cpus(rank, local_world))
+
 import torch
 import torch.distributed as dist
 
