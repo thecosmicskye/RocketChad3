@@ -1,5 +1,7 @@
 # The setter runs at startup and every step. Arenas marked in its GPU boolean
 # mask have been reset to kickoff; the mask may contain no true values.
+# With LeaguePool, env.opponents.pending identifies the next opponent per arena;
+# -1 means the current policy. Read it in the callback, not in this factory.
 def make_state_setter(env):
     return lambda reset: None
 

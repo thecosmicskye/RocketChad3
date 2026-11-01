@@ -4,7 +4,7 @@ import torch
 
 
 class Environment:
-    def __init__(self, config, example, seed, device):
+    def __init__(self, config, example, seed, device, *, initialize=True):
         self.config = config
         self.arenas = config['arenas']
         self.tick_skip, self.device, self.seed = config['tick_skip'], torch.device(device), seed
@@ -72,7 +72,12 @@ class Environment:
         self.reset_count = torch.zeros_like(self.age)
         self.env_ids = torch.arange(self.arenas, device=self.device, dtype=torch.int64)
         self.commands = torch.zeros((self.arenas, 2), dtype=torch.int64, device=self.device)
+        self.opponents = None
         self.set_state = example['make_state_setter'](self)
+        if initialize:
+            self.initialize()
+
+    def initialize(self):
         with torch.no_grad():
             self.set_state(torch.ones(self.arenas, dtype=torch.bool, device=self.device))
 

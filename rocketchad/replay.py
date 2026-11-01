@@ -1,6 +1,11 @@
 import torch
 
 
+def replay_mask(env, reset, sampled):
+    select = getattr(env.opponents, 'replay_starts', None)
+    return reset & sampled if select is None else select(reset, sampled)
+
+
 class NativeReplayStarts:
     def __init__(self, env, cars, balls, configs, pads, fraction=0.5, *, jitter_rows=None, jitter_eligible=None):
         import rocketgpu_py
@@ -50,7 +55,8 @@ class NativeReplayStarts:
         self.kickoff_configs = self.configs.clone()
 
     def __call__(self, reset):
-        self.selected.copy_(reset & (torch.rand(self.env.arenas, device=self.env.device) < self.fraction))
+        sampled = torch.rand(self.env.arenas, device=self.env.device) < self.fraction
+        self.selected.copy_(replay_mask(self.env, reset, sampled))
         if self.mode_rows is None:
             rows = torch.randint(self.cache.size, (self.env.arenas,), device=self.env.device)
             self.indices.copy_(torch.where(self.selected, rows, -1))

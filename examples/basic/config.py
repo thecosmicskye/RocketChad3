@@ -24,7 +24,8 @@ from rewards import reward
 # maps car data into blue-three, orange-three order.
 # To train against saved policies, add 'opponents': [{'path': 'checkpoint.pt',
 # 'team_size': 3, 'retry': True}] and 'league_fraction': 0.25. The fraction
-# counts arenas; the learner controls one team in those arenas.
+# counts arenas; the learner controls one team in those arenas. See opponents.py
+# for per-opponent kickoff and replay starts.
 # Multi-GPU models must use every optimized parameter on every rank.
 # To use standard DDP, set 'grad_reduce': 'ddp', leave microbatch at 0, and use
 # every trainable parameter on every rank.

@@ -28,6 +28,7 @@
 
 import rocketgpu_py_cuda as views
 import torch
+from rocketchad.replay import replay_mask
 
 
 def _state_arrays(env):
@@ -52,6 +53,7 @@ def capture_states(env):
 
 class ReplayStarts:
     def __init__(self, env, path, fraction=0.5):
+        self.env = env
         self.arenas, self.device, self.fraction = env.arenas, env.device, fraction
         self.arrays = _state_arrays(env)
         self.frames = torch.load(path, map_location=env.device, weights_only=True)
@@ -65,7 +67,7 @@ class ReplayStarts:
         }
 
     def __call__(self, reset):
-        selected = reset & (torch.rand(self.arenas, device=self.device) < self.fraction)
+        selected = replay_mask(self.env, reset, torch.rand(self.arenas, device=self.device) < self.fraction)
         if self.mode_rows is None:
             rows = torch.randint(self.count, (self.arenas,), device=self.device)
         else:

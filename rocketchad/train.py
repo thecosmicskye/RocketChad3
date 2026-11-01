@@ -132,8 +132,8 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
         rollout_forward = torch.compile(rollout_forward, dynamic=True, options=FUSED_AUTOTUNE)
     rollout_forward = chunked_rollout_forward(rollout_forward, config.get('rollout_forward_rows', 0))
 
-    def make_environment():
-        env = Environment(config, example, config['seed'] + rank * 1000003, device)
+    def make_environment(*, initialize=True):
+        env = Environment(config, example, config['seed'] + rank * 1000003, device, initialize=initialize)
         if config.get('compile_obs', False):
             env.observe = torch.no_grad()(torch.compile(env.observe, dynamic=False,
                                                        options={'triton.cudagraphs': False}))
@@ -148,11 +148,13 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
     saved_opponents = state['rng'][rank].get('opponents') if resume else None
     if saved_opponents is not None:
         config['league_fraction'] = state['rng'][rank]['opponent_fraction']
-    env = make_environment()
+    env = make_environment(initialize=False)
     opponents = None if make_opponents is None else make_opponents(env, model, config, saved_opponents)
     if saved_opponents is not None and opponents is not None:
         opponents.load_state_dict(saved_opponents)
         opponents.load_model_state_dict(state['opponent_models'])
+    env.opponents = opponents
+    env.initialize()
     rollout_graph = None
     host_observations = None
     try:

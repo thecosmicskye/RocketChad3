@@ -3,6 +3,8 @@ import torch.distributed as dist
 
 from .precision import training_forward
 
+STARTS = {'mixed': 0, 'kickoff': 1, 'replay': 2}
+
 
 def sample(logits):
     probabilities = logits.log_softmax(-1).exp()
@@ -32,6 +34,7 @@ class LeaguePool:
         self.tried = [False] * len(self.members)
         self.totals = [[0, 0] for _ in self.members]
         self.stats = torch.zeros((len(self.members), 3), device=env.device)
+        self.start_modes = torch.tensor([0] + [STARTS[m.get('starts', 'mixed')] for m in self.members], device=env.device)
         self.active = torch.full((env.arenas,), -1, dtype=torch.int64, device=env.device)
         self.pending = self.active.clone()
         self.rebind(env)
@@ -50,10 +53,12 @@ class LeaguePool:
         self.tried.append(False)
         self.totals.append([0, 0])
         self.stats = torch.cat((self.stats, self.stats.new_zeros((1, 3))))
+        self.start_modes = torch.cat((self.start_modes, self.start_modes.new_tensor([STARTS[member.get('starts', 'mixed')]])))
         self.draw()
 
     def rebind(self, env):
         self.env = env
+        env.opponents = self
         self.active.copy_(self.pending)
         arena = torch.arange(env.arenas, device=env.device)
         slots = torch.arange(env.players, device=env.device)
@@ -124,6 +129,10 @@ class LeaguePool:
             actions.index_copy_(0, rows, torch.where(self.active[arenas] == member, chosen, previous))
         return actions
 
+    def replay_starts(self, reset, sampled):
+        modes = self.start_modes[self.pending + 1]
+        return reset & ((modes == 2) | ((modes == 0) & sampled))
+
     def on_step(self, done, info):
         if self.members:
             mask = self.league_mask & (self.active >= 0)
@@ -178,14 +187,17 @@ class LeaguePool:
                  for key, value in member['model'].state_dict().items()} for member in self.members]
 
     def load_state_dict(self, state):
-        if self.model_factory is not None:
-            existing = [member['model'] for member in self.members]
-            self.members = [dict(member, model=existing[i] if i < len(existing) else self.model_factory(member))
-                            for i, member in enumerate(state['members'])]
-            for member in self.members:
-                member['model'].to(self.env.device).eval().requires_grad_(False)
-            self.forward = [training_forward(member['model'], self.precision) for member in self.members]
-            self.stats = torch.zeros((len(self.members), 3), device=self.env.device)
+        existing = {(m.get('team_size', 3), m['key']): m['model'] for m in self.members}
+        self.members = []
+        for member in state['members']:
+            model = existing.get((member.get('team_size', 3), member['key']))
+            if model is None:
+                model = self.model_factory(member)
+            self.members.append(dict(member, model=model))
+            model.to(self.env.device).eval().requires_grad_(False)
+        self.forward = [training_forward(member['model'], self.precision) for member in self.members]
+        self.stats = torch.zeros((len(self.members), 3), device=self.env.device)
+        self.start_modes = torch.tensor([0] + [STARTS[m.get('starts', 'mixed')] for m in self.members], device=self.env.device)
         self.pending.copy_(state['pending'].to(self.env.device))
         self.active.copy_(self.pending)
         self.retired, self.tried, self.totals = state['retired'], state['tried'], state['totals']
