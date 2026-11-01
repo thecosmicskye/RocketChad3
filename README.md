@@ -38,6 +38,7 @@ Copy [examples/basic](examples/basic) into your project and change the pieces yo
 - [Observations](examples/basic/observations.py): return one row per player from the environment.
 - [Actions](examples/basic/actions.py): provide a table with one `[throttle, steer, pitch, yaw, roll, jump, boost, handbrake]` row per action.
 - [Rewards](examples/basic/rewards.py): return one value per player; the current phase name is passed to the function.
+- [Opponents](examples/basic/opponents.py): train against saved policies.
 - [State setter and terminal conditions](examples/basic/episode.py): choose starting states, including [replays](examples/basic/replay_starts.py), and when episodes end.
 - [Optimizer](examples/basic/optimizer.py): choose `adam`, `adamw` or `muon` in the config, or return your own optimizer.
 - [Configuration](examples/basic/config.py) and [Python entry point](examples/basic/run.py): set hyperparameters and pass components to training.

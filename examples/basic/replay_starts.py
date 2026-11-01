@@ -9,7 +9,7 @@
 # Capture and train with the same RocketGPU build, car configuration and slot
 # capacity. Mixed-mode capture stores team sizes to match starts to their mode.
 # To enable replay starts, uncomment the example in config.py.
-# For RocketChad2's native replay cache, build CMakeLists.txt with
+# For the native replay cache, build CMakeLists.txt with
 # ROCKETCHAD_BUILD_NATIVE=ON and add the build directory and its rocketgpu/python
 # directory to PYTHONPATH. NativeReplayStarts requires six car slots per arena.
 # For each replay frame provide its blue-first cars, ball, car configurations

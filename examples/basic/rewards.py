@@ -1,6 +1,7 @@
 import torch
 
 
+# Goal arguments mark new crossings in the current decision.
 def reward(env, blue_goals, orange_goals, phase):
     if phase == 'velocity':
         goals = env.ball['pos'].new_tensor([[0.0, 6000.0, 0.0], [0.0, -6000.0, 0.0]])
