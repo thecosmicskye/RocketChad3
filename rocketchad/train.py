@@ -277,16 +277,21 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                 dist.all_reduce(metrics)
             torch.cuda.synchronize(device)
             mean_metrics = metrics / (count * world)
+            entropy_weight = entropy_band.weight if entropy_band is not None else None
             if entropy_band is not None:
                 entropy_band.update(mean_metrics[2].item())
             if rank == 0:
                 total_seconds = time.monotonic() - iteration_started
                 policy_loss, value_loss, entropy, kl = mean_metrics.tolist()
-                print(json.dumps(dict(phase=phase['name'], update=updates, player_steps=steps,
-                                      elapsed_seconds=previous_seconds + time.monotonic() - started,
-                                      player_steps_per_second=horizon * rows * world / total_seconds,
-                                      collection_seconds=collection_end - iteration_started,
-                                      policy_loss=policy_loss, value_loss=value_loss, entropy=entropy, approx_kl=kl)), flush=True)
+                metrics_row = dict(phase=phase['name'], update=updates, player_steps=steps,
+                                   elapsed_seconds=previous_seconds + time.monotonic() - started,
+                                   player_steps_per_second=horizon * rows * world / total_seconds,
+                                   collection_seconds=collection_end - iteration_started,
+                                   policy_loss=policy_loss, value_loss=value_loss, entropy=entropy, approx_kl=kl)
+                if entropy_band is not None:
+                    metrics_row.update(entropy_weight=entropy_weight, entropy_weight_next=entropy_band.weight,
+                                       entropy_ema=entropy_band.ema)
+                print(json.dumps(metrics_row), flush=True)
     finally:
         learner.close()
         rollout_graph = None
