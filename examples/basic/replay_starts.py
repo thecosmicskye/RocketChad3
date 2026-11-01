@@ -8,6 +8,14 @@
 # torch.save(capture_states(env), 'replay_states.pt')
 # Capture and train with the same RocketGPU build, team size and car configuration.
 # To enable replay starts, uncomment the example in config.py.
+# For RocketChad2's native replay cache, build CMakeLists.txt with
+# ROCKETCHAD_BUILD_NATIVE=ON and add the build directory and its rocketgpu/python
+# directory to PYTHONPATH. NativeReplayStarts requires six car slots per arena.
+# For each replay frame provide its blue-first cars, ball, car configurations
+# and 34 boost pads as RocketGPU state objects, then use them in a state setter:
+# from rocketchad.replay import NativeReplayStarts
+# def make_state_setter(env):
+#     return NativeReplayStarts(env, cars, balls, configs, pads, fraction=0.5)
 
 import rocketgpu_py_cuda as views
 import torch
