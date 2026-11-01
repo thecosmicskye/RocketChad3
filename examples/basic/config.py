@@ -18,6 +18,8 @@ from rewards import reward
 # Arena and minibatch sizes are per GPU. Rollout graphs replay GPU operations,
 # so custom callbacks used with them should not depend on Python side effects.
 # Multi-GPU models must use every optimized parameter on every rank.
+# To use standard DDP, set 'grad_reduce': 'ddp', leave microbatch at 0, and use
+# every trainable parameter on every rank.
 # rollout_host_obs stores rollout observations in BF16 host memory.
 # Set 'goal_telemetry': True to expose env.goal_events in rewards.
 # Optional entropy control: set a positive entropy and add

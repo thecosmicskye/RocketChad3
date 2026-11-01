@@ -14,6 +14,7 @@ if os.environ.get('ROCKETCHAD_RANK_CPU_PINNING') and os.environ.get('ROCKETCHAD_
 
 import torch
 import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 
 from .environment import Environment
 from .distributed_ppo import normalize_advantages
@@ -63,6 +64,7 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
             torch.cuda.set_stream(torch.cuda.Stream(device=device))
         if world > 1:
             os.environ['TORCH_NCCL_ASYNC_ERROR_HANDLING'] = '0'
+            os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '0'
             dist.init_process_group('nccl', device_id=device)
             group_initialized = True
         return _train(config, output, example, rank, world, device, make_model, make_optimizer,
@@ -112,7 +114,15 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
         dynamo.config.optimize_ddp = False
         options = dict(options=FUSED_AUTOTUNE) if config.get('rollout_compile', False) else dict(mode='default')
         shared = torch.compile(model, fullgraph=True, dynamic=False, **options)
-    learner = Learner(model, optimizer, config, critic_parameters(model), world, shared=shared)
+    learner_stream = None
+    if world > 1 and config.get('grad_reduce', 'flat_fp32') == 'ddp':
+        learner_stream = torch.cuda.Stream(device=device)
+        learner_stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(learner_stream):
+            shared = DistributedDataParallel(shared, device_ids=[device.index], broadcast_buffers=False,
+                                             gradient_as_bucket_view=True, static_graph=True)
+        torch.cuda.current_stream(device).wait_stream(learner_stream)
+    learner = Learner(model, optimizer, config, critic_parameters(model), world, shared=shared, stream=learner_stream)
     rollout_forward = training_forward(model, config['precision'])
     if config.get('rollout_compile', False):
         rollout_forward = torch.compile(rollout_forward, dynamic=True, options=FUSED_AUTOTUNE)
@@ -169,7 +179,7 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                         for parameter in critic_parameters(model):
                             parameter.zero_()
                 optimizer = build_optimizer()
-                learner = Learner(model, optimizer, config, critic_parameters(model), world, shared=shared)
+                learner = Learner(model, optimizer, config, critic_parameters(model), world, shared=shared, stream=learner_stream)
                 env = make_environment()
                 rollout_graph = RolloutGraph((env,), env) if config.get('rollout_graph', False) else None
                 obs = env.observe()

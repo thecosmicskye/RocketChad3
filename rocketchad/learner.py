@@ -31,7 +31,7 @@ class Optimizers:
 
 
 class Learner:
-    def __init__(self, model, optimizer, config, critic_parameters, world, shared=None):
+    def __init__(self, model, optimizer, config, critic_parameters, world, shared=None, stream=None):
         self.model, self.optimizer, self.config = model, optimizer, config
         self.shared = model if shared is None else shared
         self.forward = training_forward(self.shared, config['precision'])
@@ -39,10 +39,10 @@ class Learner:
         optimized = {id(p) for p in optimizer.parameters}
         self.optimized = [p for p in model.parameters() if p.requires_grad and id(p) in optimized]
         self.unoptimized = [p for p in model.parameters() if p.requires_grad and id(p) not in optimized]
-        self.stream = torch.cuda.Stream()
+        self.stream = torch.cuda.Stream() if stream is None else stream
         self.stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(self.stream):
-            self.reduce = ManualReducer(self.optimized) if world > 1 else None
+            self.reduce = ManualReducer(self.optimized) if world > 1 and config.get('grad_reduce', 'flat_fp32') != 'ddp' else None
         torch.cuda.current_stream().wait_stream(self.stream)
         self.graph = None
         self.eager_steps = 0
