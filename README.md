@@ -47,8 +47,6 @@ Copy [examples/basic](examples/basic) into your project and change the pieces yo
 
 3v3 · 15-minute target · 3 seeds · RTX 5090 · Xeon Gold 6454S
 
-Benchmark data comes from the RocketChad2 runs.
-
 ### 1 GPU · 8 physical CPU cores
 
 ![One GPU training speed, head-to-head goal share and judge panel](docs/benchmarks/one_gpu_summary.svg)
