@@ -24,7 +24,7 @@ def accumulate(forward, cfg, obs, actions, old_log, advantages, returns):
     for b, e in parts:
         o, a, l, v, r = (obs, actions, old_log, advantages, returns) if whole else (obs[b:e], actions[b:e], old_log[b:e], advantages[b:e], returns[b:e])
         logits, values = forward(o)
-        loss, part = objective_fn(logits, values, a, l, v, r, cfg['clip'], cfg['entropy'])
+        loss, part = objective_fn(logits, values, a, l, v, r, cfg['clip'], cfg.get('_entropy_tensor', cfg['entropy']))
         if whole:
             loss.backward()
             return part

@@ -4,9 +4,10 @@ def make_state_setter(env):
     return lambda reset: None
 
 
-# Return one GPU boolean per arena. PPO treats all endings, including timeouts, as terminal.
+# Return one GPU boolean per arena for true terminal states. The trainer handles
+# timeouts separately, and bootstraps them if enabled in config.py.
 def terminal_condition(env, blue_goals, orange_goals):
-    return blue_goals | orange_goals | (env.age >= env.timeouts)
+    return blue_goals | orange_goals
 
 
 # Uncomment one or both examples in config.py to replace the defaults.

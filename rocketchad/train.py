@@ -11,15 +11,18 @@ import torch.distributed as dist
 
 from .environment import Environment
 from .distributed_ppo import normalize_advantages
+from .entropy_band import EntropyBand
+from .host_rollout import HostObservations
 from .inference import chunked_rollout_forward
 from .learner import Learner, Optimizers
 from .precision import training_forward
 from .rollout_graph import RolloutGraph
+from .truncation_gae import TimeoutValues, gae as truncation_gae
 
 FUSED_AUTOTUNE = dict(max_autotune=True, coordinate_descent_tuning=True, benchmark_epilogue_fusion=False)
 
 
-def checkpoint(path, model, optimizer, config, phase_index, phase_updates, phase_seconds, updates, steps, elapsed, device, world):
+def checkpoint(path, model, optimizer, config, phase_index, phase_updates, phase_seconds, updates, steps, elapsed, device, world, entropy_band=None):
     state = {'cpu': torch.get_rng_state(), 'cuda': torch.cuda.get_rng_state(device).cpu()}
     states = [None] * world
     if world > 1:
@@ -28,14 +31,17 @@ def checkpoint(path, model, optimizer, config, phase_index, phase_updates, phase
         states[0] = state
     if int(os.environ.get('RANK', '0')) == 0:
         temporary = path.with_suffix('.tmp')
-        torch.save(dict(model=model.state_dict(), optimizer=optimizer.state_dict(), config=config,
+        saved_config = {key: value for key, value in config.items() if key != '_entropy_tensor'}
+        torch.save(dict(model=model.state_dict(), optimizer=optimizer.state_dict(), config=saved_config,
                         phase_index=phase_index, phase_updates=phase_updates, phase_seconds=phase_seconds,
-                        updates=updates, player_steps=steps, elapsed_seconds=elapsed, rng=states), temporary)
+                        updates=updates, player_steps=steps, elapsed_seconds=elapsed, rng=states,
+                        entropy_band=None if entropy_band is None else entropy_band.state_dict()), temporary)
         os.replace(temporary, path)
 
 
 def train(config, output, *, make_model, action_table, Observation, reward, make_state_setter, terminal_condition,
           make_optimizer, critic_parameters, resume=None):
+    config = dict(config)
     example = dict(action_table=action_table, Observation=Observation, reward=reward,
                    make_state_setter=make_state_setter, terminal_condition=terminal_condition)
     output = Path(output)
@@ -44,11 +50,30 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
     world = int(os.environ.get('WORLD_SIZE', '1'))
     device = torch.device('cuda', local_rank)
     torch.cuda.set_device(device)
-    if config.get('rollout_graph', False):
-        torch.cuda.set_stream(torch.cuda.Stream(device=device))
-    if world > 1:
-        os.environ['TORCH_NCCL_ASYNC_ERROR_HANDLING'] = '0'
-        dist.init_process_group('nccl', device_id=device)
+    original_stream = torch.cuda.current_stream(device)
+    group_initialized = False
+    try:
+        if config.get('rollout_graph', False):
+            torch.cuda.set_stream(torch.cuda.Stream(device=device))
+        if world > 1:
+            os.environ['TORCH_NCCL_ASYNC_ERROR_HANDLING'] = '0'
+            dist.init_process_group('nccl', device_id=device)
+            group_initialized = True
+        return _train(config, output, example, rank, world, device, make_model, make_optimizer,
+                      critic_parameters, resume)
+    finally:
+        try:
+            if group_initialized:
+                dist.destroy_process_group()
+        finally:
+            if config.get('rollout_graph', False):
+                torch.cuda.set_stream(original_stream)
+
+
+def _train(config, output, example, rank, world, device, make_model, make_optimizer, critic_parameters, resume):
+    entropy_band = EntropyBand(config, device) if config.get('entropy_band') else None
+    if entropy_band is not None:
+        config['_entropy_tensor'] = entropy_band.tensor
     torch.manual_seed(config['seed'])
     model = make_model().to(device)
     if world > 1:
@@ -71,6 +96,8 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
         updates, steps = state['updates'], state['player_steps']
         torch.set_rng_state(state['rng'][rank]['cpu'])
         torch.cuda.set_rng_state(state['rng'][rank]['cuda'], device)
+        if entropy_band is not None and state.get('entropy_band') is not None:
+            entropy_band.load_state_dict(state['entropy_band'])
     else:
         torch.manual_seed(config['seed'] + rank)
     shared = model
@@ -93,16 +120,19 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
         return env
 
     env = make_environment()
-    rollout_graph = RolloutGraph((env,), env) if config.get('rollout_graph', False) else None
-    if rank == 0:
-        output.mkdir(parents=True, exist_ok=True)
-    if world > 1:
-        dist.barrier()
-    started = phase_started = time.monotonic()
-    next_save = config['checkpoint_seconds']
-    obs = env.observe()
-    rows = config['arenas'] * config['team_size'] * 2
+    rollout_graph = None
+    host_observations = None
     try:
+        rollout_graph = RolloutGraph((env,), env) if config.get('rollout_graph', False) else None
+        if rank == 0:
+            output.mkdir(parents=True, exist_ok=True)
+        if world > 1:
+            dist.barrier()
+        started = phase_started = time.monotonic()
+        next_save = config['checkpoint_seconds']
+        obs = env.observe()
+        rows = config['arenas'] * config['team_size'] * 2
+        timeout_values = None
         while True:
             now = time.monotonic()
             elapsed = now - started
@@ -119,6 +149,9 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
             if transition:
                 learner.close()
                 rollout_graph = None
+                if host_observations is not None:
+                    host_observations.close()
+                    host_observations = None
                 env.close()
                 phase_index += 1
                 phase_updates = 0
@@ -134,19 +167,30 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
                 env = make_environment()
                 rollout_graph = RolloutGraph((env,), env) if config.get('rollout_graph', False) else None
                 obs = env.observe()
+                timeout_values = None
                 phase_elapsed = 0.0
             if save or stop:
                 checkpoint(output / f'checkpoint_{updates}.pt', model, optimizer, config, phase_index, phase_updates,
-                           phase_elapsed, updates, steps, previous_seconds + elapsed, device, world)
+                           phase_elapsed, updates, steps, previous_seconds + elapsed, device, world, entropy_band)
                 next_save = elapsed + config['checkpoint_seconds']
             if stop:
                 break
             horizon = phase['horizon']
-            observations = torch.empty((horizon, rows, obs.shape[-1]), device=device)
+            if config.get('rollout_host_obs', False):
+                if host_observations is None:
+                    host_observations = HostObservations(horizon, rows, obs.shape[-1], None, device, config['minibatch'])
+                observations = None
+            else:
+                observations = torch.empty((horizon, rows, obs.shape[-1]), device=device)
             actions = torch.empty((horizon, rows), dtype=torch.int64, device=device)
             log_probs = torch.empty((horizon, rows), device=device)
             values, rewards = torch.empty_like(log_probs), torch.empty_like(log_probs)
             dones = torch.empty_like(log_probs, dtype=torch.bool)
+            if config.get('timeout_bootstrap', False):
+                if timeout_values is None:
+                    timeout_values = TimeoutValues(model, horizon, rows, config['minibatch'], device,
+                                                   obs_size=obs.shape[-1], players=env.players)
+                timeout_values.begin()
             iteration_started = time.monotonic()
             with torch.no_grad():
                 if rollout_graph is not None:
@@ -158,51 +202,80 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
                     log_all = logits.log_softmax(-1)
                     probabilities = log_all.exp()
                     action = probabilities.div(torch.empty_like(probabilities).exponential_()).argmax(-1)
-                    following, reward_value, done = env.step(action, phase['name'])
+                    if timeout_values is None:
+                        following, reward_value, done = env.step(action, phase['name'])
+                        info = None
+                    else:
+                        following, reward_value, done, info = env.step(action, phase['name'], capture_transition=True)
                     if rollout_graph is None:
                         obs = following
                     else:
                         obs.copy_(following)
-                    return action, log_all.gather(-1, action[:, None]).squeeze(-1), value, reward_value, done
+                    return action, log_all.gather(-1, action[:, None]).squeeze(-1), value, reward_value, done, info
 
                 for index in range(horizon):
-                    observations[index].copy_(obs)
-                    action, log_prob, value, reward_value, done = decide() if rollout_graph is None else rollout_graph(decide)
+                    if host_observations is None:
+                        observations[index].copy_(obs)
+                    else:
+                        host_observations.record(index, obs)
+                    action, log_prob, value, reward_value, done, info = decide() if rollout_graph is None else rollout_graph(decide)
                     actions[index] = action
                     log_probs[index] = log_prob
                     values[index], rewards[index], dones[index] = value, reward_value, done
+                    if timeout_values is not None:
+                        timeout_values.capture(index, info['transition_observation'], info)
                 _, next_value = rollout_forward(obs)
-                advantages = torch.empty_like(rewards)
-                running = torch.zeros(rows, device=device)
-                for index in reversed(range(horizon)):
-                    alive = (~dones[index]).float()
-                    delta = rewards[index] + phase['gamma'] * next_value * alive - values[index]
-                    running = delta + phase['gamma'] * phase['gae_lambda'] * alive * running
-                    advantages[index] = running
-                    next_value = values[index]
-                returns = advantages + values
+                if timeout_values is not None:
+                    timeout_values.flush()
+                    truncated = timeout_values.truncated
+                    advantages, returns = truncation_gae(rewards, values, next_value, dones & ~truncated,
+                                                         truncated, timeout_values.values,
+                                                         phase['gamma'], phase['gae_lambda'])
+                else:
+                    advantages = torch.empty_like(rewards)
+                    running = torch.zeros(rows, device=device)
+                    for index in reversed(range(horizon)):
+                        alive = (~dones[index]).float()
+                        delta = rewards[index] + phase['gamma'] * next_value * alive - values[index]
+                        running = delta + phase['gamma'] * phase['gae_lambda'] * alive * running
+                        advantages[index] = running
+                        next_value = values[index]
+                    returns = advantages + values
                 advantages = normalize_advantages(advantages)
             torch.cuda.synchronize(device)
             collection_end = time.monotonic()
-            sources = (observations.flatten(0, 1), actions.flatten(), log_probs.flatten(),
+            flat_obs = observations.flatten(0, 1) if host_observations is None else host_observations.end_rollout(horizon)
+            sources = (flat_obs, actions.flatten(), log_probs.flatten(),
                        advantages.flatten(), returns.flatten())
             metrics = torch.zeros(4, device=device)
             count = 0
+            if host_observations is not None:
+                host_observations.cpu_wait_seconds = 0.0
             for _ in range(config['epochs']):
                 permutation = torch.randperm(horizon * rows, device=device)
-                for start in range(0, len(permutation), config['minibatch']):
-                    indices = permutation[start:start + config['minibatch']]
-                    metrics += learner.step(sources, indices, burnin=phase_updates < phase['critic_burnin'])
-                    count += 1
+                if host_observations is None:
+                    for indices in permutation.split(config['minibatch']):
+                        metrics += learner.step(sources, indices, burnin=phase_updates < phase['critic_burnin'])
+                        count += 1
+                else:
+                    batches = list(permutation.split(config['minibatch']))
+                    groups = (batches[:-1], batches[-1:]) if len(batches[-1]) != config['minibatch'] else (batches,)
+                    for group in groups:
+                        for _, indices, obs_rows, _ in host_observations.epoch(flat_obs, group, None):
+                            metrics += learner.step(sources, indices, burnin=phase_updates < phase['critic_burnin'], obs=obs_rows)
+                            count += 1
             phase_updates += 1
             updates += 1
             steps += horizon * rows * world
             if world > 1:
                 dist.all_reduce(metrics)
             torch.cuda.synchronize(device)
+            mean_metrics = metrics / (count * world)
+            if entropy_band is not None:
+                entropy_band.update(mean_metrics[2].item())
             if rank == 0:
                 total_seconds = time.monotonic() - iteration_started
-                policy_loss, value_loss, entropy, kl = (metrics / (count * world)).tolist()
+                policy_loss, value_loss, entropy, kl = mean_metrics.tolist()
                 print(json.dumps(dict(phase=phase['name'], update=updates, player_steps=steps,
                                       elapsed_seconds=previous_seconds + time.monotonic() - started,
                                       player_steps_per_second=horizon * rows * world / total_seconds,
@@ -211,9 +284,9 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
     finally:
         learner.close()
         rollout_graph = None
+        if host_observations is not None:
+            host_observations.close()
         env.close()
-        if world > 1:
-            dist.destroy_process_group()
 
 
 def main():

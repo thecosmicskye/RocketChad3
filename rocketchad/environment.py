@@ -42,7 +42,7 @@ class Environment:
     def observe(self):
         return self.observation(self)
 
-    def step(self, actions, phase):
+    def step(self, actions, phase, *, capture_transition=False):
         controls = self.actions[actions]
         self.last_action.copy_(controls.reshape(self.arenas, self.players, 8))
         for index, name in enumerate(('throttle', 'steer', 'pitch', 'yaw', 'roll', 'jump', 'boost', 'handbrake')):
@@ -52,7 +52,12 @@ class Environment:
         orange = self.state['orange_score'].to(torch.int64) > 0
         reward = self.reward(self, blue, orange, phase)
         self.age.add_(1)
-        done = self.terminal_condition(self, blue, orange)
+        terminal = self.terminal_condition(self, blue, orange)
+        timeout = (self.age >= self.timeouts) & ~terminal
+        done = terminal | timeout
+        if capture_transition:
+            info = dict(timeout=timeout, blue_goals=blue, orange_goals=orange,
+                        transition_observation=self.observe().clone())
         self.reset_count.add_(done)
         self.commands[:, 0] = done.to(torch.int64) * ((1 << 0) | (1 << 8) | (1 << 16))
         self.commands[:, 1] = (self.seed + self.env_ids * 1000003 + self.reset_count * 9176) & 9223372036854775807
@@ -61,7 +66,8 @@ class Environment:
         self.timeouts.masked_fill_(done, self.episode_steps)
         self.last_action.masked_fill_(done[:, None, None], 0)
         self.set_state(done)
-        return self.observe(), reward, done.repeat_interleave(self.players)
+        result = (self.observe(), reward, done.repeat_interleave(self.players))
+        return (*result, info) if capture_transition else result
 
     def close(self):
         torch.cuda.synchronize(self.device)

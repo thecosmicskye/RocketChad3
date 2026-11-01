@@ -42,7 +42,7 @@ class Learner:
         self.stream = torch.cuda.Stream()
         self.stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(self.stream):
-            self.reduce = ManualReducer(model) if world > 1 else None
+            self.reduce = ManualReducer(self.optimized) if world > 1 else None
         torch.cuda.current_stream().wait_stream(self.stream)
         self.graph = None
         self.eager_steps = 0
@@ -54,7 +54,7 @@ class Learner:
             self.reduce()
         return stats
 
-    def step(self, sources, indices, burnin=False):
+    def step(self, sources, indices, burnin=False, obs=None):
         if indices.numel() != self.config['minibatch'] and self.graph is not None:
             self.graph.graph.reset()
             self.graph = None
@@ -62,7 +62,8 @@ class Learner:
         if not self.optimizer.graph or burnin or self.eager_steps < 11 or indices.numel() != self.config['minibatch']:
             self.stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(self.stream):
-                inputs = tuple(source[indices] for source in sources)
+                inputs = (sources[0][indices] if obs is None else obs.float(),
+                          *(source[indices] for source in sources[1:]))
                 self.optimizer.zero_grad()
                 for p in self.unoptimized:
                     p.grad = None
@@ -81,11 +82,12 @@ class Learner:
         if self.graph is None:
             self.stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(self.stream):
-                inputs = tuple(source[indices] for source in sources)
+                inputs = (sources[0][indices] if obs is None else obs.float(),
+                          *(source[indices] for source in sources[1:]))
                 self.graph = PPOMinibatchGraph(self.shared, self.model, self.optimizer, self.config,
                                               inputs, self.stream, reduce_gradients=self.reduce)
             torch.cuda.current_stream().wait_stream(self.stream)
-        return self.graph.step_indexed(sources, indices)
+        return self.graph.step_indexed(sources, indices, None if obs is None else obs.float())
 
     def close(self):
         if self.graph is not None:

@@ -3,8 +3,8 @@ import torch.distributed as dist
 
 class ManualReducer:
 
-    def __init__(self, model):
-        self.params = [p for p in model.parameters() if p.requires_grad]
+    def __init__(self, parameters):
+        self.params = list(parameters)
         # Hold each parameter's AccumulateGrad node on the capture stream so CUDA graph capture sees no stale stream-0 reference.
         self.accumulators = [p.view_as(p).grad_fn.next_functions[0][0] for p in self.params]
         self.world = dist.get_world_size()
