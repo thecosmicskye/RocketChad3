@@ -34,6 +34,8 @@ from rewards import reward
 # To use standard DDP, set 'grad_reduce': 'ddp', leave microbatch at 0, and use
 # every trainable parameter on every rank.
 # rollout_host_obs stores rollout observations in BF16 host memory.
+# Set 'rollout_obs_storage': 'bf16' to store them in BF16 GPU memory instead.
+# Either BF16 option rounds observations before PPO; FP32 is the default.
 # Set 'goal_telemetry': True to expose env.goal_events in rewards. Event
 # validity assumes a goal ends the episode.
 # Optional entropy control: set a positive entropy and add

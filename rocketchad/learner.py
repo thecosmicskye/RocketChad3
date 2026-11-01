@@ -59,6 +59,8 @@ class Learner:
             self.graph.graph.reset()
             self.graph = None
             self.eager_steps = 0
+        if obs is None and sources[0].dtype == torch.bfloat16:
+            obs = sources[0].index_select(0, indices).float()
         if not self.optimizer.graph or burnin or self.eager_steps < 11 or indices.numel() != self.config['minibatch']:
             self.stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(self.stream):

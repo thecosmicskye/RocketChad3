@@ -221,7 +221,8 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                     host_observations = HostObservations(horizon, rows, obs.shape[-1], None, device, config['minibatch'])
                 observations = None
             else:
-                observations = torch.empty((horizon, rows, obs.shape[-1]), device=device)
+                storage_dtype = torch.bfloat16 if config.get('rollout_obs_storage') == 'bf16' else torch.get_default_dtype()
+                observations = torch.empty((horizon, rows, obs.shape[-1]), dtype=storage_dtype, device=device)
             actions = torch.empty((horizon, rows), dtype=torch.int64, device=device)
             log_probs = torch.empty((horizon, rows), device=device)
             values, rewards = torch.empty_like(log_probs), torch.empty_like(log_probs)
