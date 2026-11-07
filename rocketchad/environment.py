@@ -3,6 +3,11 @@ import rocketgpu_py_cuda as views
 import torch
 
 
+class _Bytes:
+    def __init__(self, ptr, nbytes):
+        self.__cuda_array_interface__ = dict(data=(ptr, False), shape=(nbytes,), typestr='|u1', version=3)
+
+
 class Environment:
     def __init__(self, config, example, seed, device, *, initialize=True, generation=0):
         self.config = config
@@ -51,7 +56,17 @@ class Environment:
         self.sim.reset_to_kickoff(self.seed, self.stream)
 
         def fields(name):
-            return {key: torch.as_tensor(value, device=self.device) for key, value in views.field_arrays(self.sim, name).items()}
+            # Each field views one tensor over the whole struct array, so its storage offset carries its alignment:
+            # compiled code takes a zero-offset input to be 16-byte aligned and otherwise copies the array every call.
+            entry = self.sim.device_arrays()[name]
+            raw = torch.as_tensor(_Bytes(entry['__cuda_array_interface__']['data'][0], entry['itemsize'] * entry['count']),
+                                  device=self.device)
+            out = {}
+            for key, value in views.field_arrays(self.sim, name).items():
+                field = torch.as_tensor(value, device=self.device)
+                out[key] = raw.view(field.dtype).as_strided(field.shape, field.stride(),
+                                                            (field.data_ptr() - raw.data_ptr()) // field.element_size())
+            return out
 
         self.car, self.ball = fields('car_states'), fields('ball_states')
         self.pads, self.state, self.controls = fields('boost_pad_states'), fields('env_states'), fields('controls')

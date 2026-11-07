@@ -138,6 +138,9 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
         if config.get('compile_obs', False):
             env.observe = torch.no_grad()(torch.compile(env.observe, dynamic=False,
                                                        options={'triton.cudagraphs': False}))
+            jitter = getattr(env.set_state, 'jitter', None)
+            if jitter is not None:
+                jitter.compile(env.arenas)
         return env
 
     def player_rows(env, opponents):

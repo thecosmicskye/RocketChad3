@@ -22,14 +22,22 @@ class AttentionBlock(nn.Module):
     def forward(self, tokens, key_present=None, readout_only=False):
         batch, length, _ = tokens.shape
         qkv = self.qkv(self.attention_norm(tokens)).reshape(batch, length, 3, self.heads, self.width // self.heads)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)
-        mask = None if key_present is None else key_present[:, None, None, :]
-        attended = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0)
-        attended = attended.transpose(1, 2).reshape(batch, length, self.width)
         if readout_only:
             tokens = tokens[:, ::7]
-            attended = attended[:, ::7]
-        tokens = tokens + self.projection(attended)
+        if torch.compiler.is_compiling() and not torch.compiler.is_exporting():
+            # Compiled: attention over these few tokens as broadcast reductions, which inductor fuses.
+            q, k, v = qkv.unbind(2)
+            q = q[:, ::7] if readout_only else q
+            scores = (q[:, :, None] * k[:, None]).sum(-1) * (self.width // self.heads) ** -0.5
+            if key_present is not None:
+                scores = scores.masked_fill(~key_present[:, None, :, None], float('-inf'))
+            attended = (scores.softmax(2)[..., None] * v[:, None]).sum(2).to(tokens.dtype)
+        else:
+            q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)
+            q = q[:, :, ::7] if readout_only else q
+            mask = None if key_present is None else key_present[:, None, None, :]
+            attended = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0).transpose(1, 2)
+        tokens = tokens + self.projection(attended.reshape(batch, tokens.shape[1], self.width))
         return tokens + self.mlp(self.mlp_norm(tokens))
 
 class EntityAttentionActorCritic(nn.Module):

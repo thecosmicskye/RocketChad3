@@ -155,10 +155,26 @@ class LeaguePool:
                 self.groups.append((member, frozen[selected].to(self.env.device), arenas[selected].to(self.env.device)))
 
     def override_actions(self, observations, actions, current_forward):
-        for member, rows, arenas in self.groups:
+        # Inside a captured rollout graph each group's forward runs on its own stream, so the graph overlaps them.
+        streams = None
+        if len(self.groups) > 1 and torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            streams = self.__dict__.setdefault('streams', [])
+            streams.extend(torch.cuda.Stream(device=actions.device) for _ in range(len(self.groups) - len(streams)))
+            origin = torch.cuda.current_stream(actions.device)
+        samples = []
+        for index, (member, rows, _) in enumerate(self.groups):
             forward = current_forward if member < 0 else self.forward[member]
-            logits, _ = forward(observations.index_select(0, rows))
-            chosen = sample(logits)
+            inputs = observations.index_select(0, rows)
+            if streams is None:
+                samples.append(sample(forward(inputs)[0]))
+                continue
+            streams[index].wait_stream(origin)
+            with torch.cuda.stream(streams[index]):
+                samples.append(sample(forward(inputs)[0]))
+        if streams is not None:
+            for stream in streams[:len(self.groups)]:
+                origin.wait_stream(stream)
+        for (member, rows, arenas), chosen in zip(self.groups, samples):
             previous = actions.index_select(0, rows)
             actions.index_copy_(0, rows, torch.where(self.active[arenas] == member, chosen, previous))
         return actions
