@@ -45,7 +45,7 @@ Copy [examples/basic](examples/basic) into your project and change the pieces yo
 
 ## Benchmark
 
-3v3 · 15-minute target · 3 seeds · RTX 5090 · Xeon Gold 6454S
+3v3 · 15-minute target · RTX 5090 · Threadripper PRO 9955WX
 
 ### 1 GPU · 8 physical CPU cores
 
@@ -53,7 +53,9 @@ Copy [examples/basic](examples/basic) into your project and change the pieces yo
 
 ![One GPU ball velocity toward goal](docs/benchmarks/one_gpu_curves.svg)
 
-### 4 GPUs · 32 physical CPU cores
+### 4 GPUs · 32 physical CPU cores · outdated
+
+Earlier RocketChad3 build and entropy 0, on a Xeon Gold 6454S.
 
 ![Four GPU training speed, head-to-head goal share and judge panel](docs/benchmarks/four_gpu_summary.svg)
 
@@ -63,6 +65,8 @@ Copy [examples/basic](examples/basic) into your project and change the pieces yo
 <summary>Method and limitations</summary>
 
 - **Training:** Shared 1.23M-parameter model; 8,192 arenas per GPU, 32 decisions and one PPO pass. After 60 seconds of ball-velocity rewards, training used goal/concede rewards, with a critic reset and 16 critic-only updates.
+- **Entropy:** 0.01 (0.045 on GigaLearn's normalized entropy).
+- **Seeds:** RocketChad3 4, GigaLearn · RocketSim v3 2. Trainers marked * kept their earlier 3-seed runs on a Xeon Gold 6454S with entropy 0.
 - **Timing:** SPS includes startup and saving.
 - **RLGym-Learn:** Advantages normalized per minibatch.
 - **GigaLearn:** Four-GPU runs used CPU-staged synchronization after NCCL runs crashed.
