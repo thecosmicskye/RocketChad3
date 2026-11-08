@@ -67,6 +67,7 @@ Earlier RocketChad3 build and entropy 0, on a Xeon Gold 6454S.
 - **Training:** Shared 1.23M-parameter model; 8,192 arenas per GPU, 32 decisions and one PPO pass. After 60 seconds of ball-velocity rewards, training used goal/concede rewards, with a critic reset and 16 critic-only updates.
 - **Entropy:** 0.01 (0.045 on GigaLearn's normalized entropy).
 - **Seeds:** RocketChad3 4, GigaLearn · RocketSim v3 2. Trainers marked * kept their earlier 3-seed runs on a Xeon Gold 6454S with entropy 0.
+- **Scoring:** 64 side-swapped 3v3 pairs for 300 seconds, with sampled actions. The judges are 2 seeds of the previous RocketChad3 build after 15 minutes. Trainers marked * weren't rescored.
 - **Timing:** SPS includes startup and saving.
 - **RLGym-Learn:** Advantages normalized per minibatch.
 - **GigaLearn:** Four-GPU runs used CPU-staged synchronization after NCCL runs crashed.
