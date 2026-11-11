@@ -30,6 +30,8 @@ Arena and minibatch sizes are per GPU. Set `precision` to `fp32` in the config i
 
 The example runs until stopped and saves every ten minutes. To resume, use the same configuration and GPU count, and add `--resume path/to/checkpoint.pt`. Episodes restart through the state setter. The optimizer is recreated when a training phase changes.
 
+**Checkpoint behavior change:** Earlier checkpoints still load, but this version changes flip availability, defaults to team-relative boost pads, and masks absent cars in 1v1 and 2v2 attention. Resumed policies and frozen opponents can therefore behave differently. Set `team_pad_frame` to `False` to retain the earlier boost-pad ordering; this does not restore the other behaviors.
+
 ## Customize
 
 Copy [examples/basic](examples/basic) into your project and change the pieces you need:
