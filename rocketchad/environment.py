@@ -54,6 +54,21 @@ class Environment:
             for state in states:
                 state.car_visit_order_mode = 0
             self.sim.upload_env_states(states, self.stream)
+        bodies = config.get('car_bodies')
+        self.car_bodies = self.car_body = self.car_configs = None
+        if bodies:
+            weights = torch.tensor([float(bodies[name]) for name in bodies] if isinstance(bodies, dict) else [1.0] * len(bodies))
+            self.car_bodies = tuple(bodies)
+            generator = torch.Generator().manual_seed((seed + 7046029254386353131) % (2 ** 63 - 1))
+            self.car_body = torch.multinomial(weights, self.arenas * self.players, True, generator=generator).reshape(
+                self.arenas, self.players).to(self.device)
+            physical = self.car_body if self.team_layout is None else self.team_layout.physical_config_values(self.car_body)
+            presets = [getattr(rg, name + 'Config')() for name in self.car_bodies]
+            self.sim.set_car_configs([presets[index] for index in physical.flatten().tolist()], self.stream)
+            entry = self.sim.device_arrays()['car_configs']
+            self.car_configs = torch.as_tensor(_Bytes(entry['__cuda_array_interface__']['data'][0], entry['itemsize'] * entry['count']),
+                                               device=self.device).reshape(self.arenas, -1)
+            self.kickoff_configs = self.car_configs.clone()
         self.sim.reset_to_kickoff(self.seed, self.stream)
 
         def fields(name):
@@ -167,6 +182,9 @@ class Environment:
         self.reset_count.add_(done)
         self.commands[:, 0] = done.to(torch.int64) * ((1 << 0) | (1 << 8) | (1 << 16))
         self.commands[:, 1] = (self.seed + self.env_ids * 1000003 + self.reset_count * 9176) & 9223372036854775807
+        if self.car_configs is not None:
+            # A state setter may have changed bodies; the kickoff reset spawns each car at its body's height.
+            self.car_configs.copy_(torch.where(done[:, None], self.kickoff_configs, self.car_configs))
         self.sim.apply_env_commands_device(self.commands.data_ptr(), self.arenas, self.stream)
         self.age.masked_fill_(done, 0)
         self.timeouts.masked_fill_(done, self.episode_steps)
@@ -186,5 +204,5 @@ class Environment:
         self.opponents = None
         for fields in (self.car, self.ball, self.pads, self.state, self.controls):
             fields.clear()
-        self.goal_events = self.goal_telemetry = None
+        self.goal_events = self.goal_telemetry = self.car_configs = None
         self.sim = None

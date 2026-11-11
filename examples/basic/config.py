@@ -22,6 +22,9 @@ from rewards import reward
 # are 3v3 arenas. Custom observations and rewards should return six rows per
 # arena; env.team_layout identifies active slots and env.logical_car_field
 # maps car data into blue-three, orange-three order.
+# For mixed car bodies at kickoff, add 'car_bodies': ('Octane', 'Dominus', 'Plank',
+# 'Breakout', 'Hybrid', 'Merc'), or a dict of body: weight. Each car keeps one
+# body for the run; env.car_body [arenas, car slots] indexes env.car_bodies.
 # Boost-pad states are oriented to each team's view ('team_pad_frame': True).
 # Use the same setting as resumed checkpoints and opponents.
 # To train against saved policies, add 'opponents': [{'path': 'checkpoint.pt',
