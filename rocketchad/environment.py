@@ -1,3 +1,4 @@
+import inspect
 import rocketgpu_py as rg
 import rocketgpu_py_cuda as views
 import torch
@@ -77,6 +78,7 @@ class Environment:
             self.goal_telemetry = GoalTelemetry(self.sim, self.device, self.tick_skip)
         self.actions = example['action_table'](self.device)
         self.observation = example['Observation'](self)
+        self.subset_observe = len(inspect.signature(self.observation).parameters) >= 2
         self.reward = example['reward']
         self.terminal_condition = example['terminal_condition']
         self.last_action = torch.zeros((self.arenas, self.players, 8), device=self.device)
@@ -137,7 +139,11 @@ class Environment:
         self.goal_inside.copy_((self.ball['pos'][:, 1].abs() > self.goal_threshold) & ~done)
         if capture_transition or capture_info:
             info = dict(timeout=timeout, blue_goals=blue, orange_goals=orange)
-            if capture_transition:
+            if capture_transition == 'timeout' and self.subset_observe:
+                timeout_arenas = timeout.nonzero().flatten()
+                info['timeout_arenas'] = timeout_arenas
+                info['transition_observation'] = self.observation(self, timeout_arenas)
+            elif capture_transition:
                 info['transition_observation'] = self.observe().clone()
         self.reset_count.add_(done)
         self.commands[:, 0] = done.to(torch.int64) * ((1 << 0) | (1 << 8) | (1 << 16))

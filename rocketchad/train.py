@@ -129,7 +129,8 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                                              gradient_as_bucket_view=True, static_graph=True)
         torch.cuda.current_stream(device).wait_stream(learner_stream)
     learner = Learner(model, optimizer, config, tuple(critic_parameters(model)), world, shared=shared, stream=learner_stream)
-    rollout_forward = training_forward(model, config['precision'])
+    timeout_forward = training_forward(model, config['precision'])
+    rollout_forward = timeout_forward
     if config.get('rollout_compile', False):
         rollout_forward = torch.compile(rollout_forward, dynamic=True, options=FUSED_AUTOTUNE)
     rollout_forward = chunked_rollout_forward(rollout_forward, config.get('rollout_forward_rows', 0))
@@ -249,7 +250,8 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
             if phase.get('timeout_bootstrap', config.get('timeout_bootstrap', False)):
                 if timeout_values is None:
                     timeout_values = TimeoutValues(model, horizon, full_rows, config['minibatch'], device,
-                                                   owned=active, obs_size=obs.shape[-1], players=env.players)
+                                                   owned=active, obs_size=obs.shape[-1], players=env.players,
+                                                   forward=timeout_forward)
                 timeout_values.begin()
             else:
                 timeout_values = None
@@ -272,8 +274,10 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                         following, reward_value, done = env.step(applied, phase['name'])
                         info = None
                     else:
+                        capture_mode = (('full' if rollout_graph is not None and not rollout_graph.eager else 'timeout')
+                                        if timeout_values is not None else False)
                         following, reward_value, done, info = env.step(applied, phase['name'],
-                            capture_transition=timeout_values is not None, capture_info=opponents is not None)
+                            capture_transition=capture_mode, capture_info=opponents is not None)
                     if opponents is not None:
                         opponents.on_step(done.reshape(env.arenas, env.players)[:, 0], info)
                     if active is not None:

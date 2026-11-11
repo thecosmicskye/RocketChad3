@@ -36,17 +36,18 @@ def gae(rewards, values, next_value, terminal, truncated=None, truncated_value=N
 
 
 class TimeoutValues:
-    def __init__(self, model, horizon, rows, batch_size, device, owned=None, *, obs_size=None, players=6):
-        self.forward = full_precision_forward(model)
+    def __init__(self, model, horizon, rows, batch_size, device, owned=None, *, obs_size=None, players=6, forward=None):
+        self.forward = full_precision_forward(model) if forward is None else forward
         self.obs_size = model.obs_size if obs_size is None else obs_size
         self.players = players
         self.batch_size, self.rows, self.owned = batch_size, rows, owned
+        self.owned_mask = None
+        if owned is not None:
+            self.owned_mask = torch.zeros(rows, dtype=torch.bool, device=device)
+            self.owned_mask.index_fill_(0, owned, True)
+        self.player_offsets = torch.arange(players, device=device)
         self.values = torch.zeros((horizon, rows), dtype=torch.float32, device=device)
         self.truncated = torch.zeros((horizon, rows), dtype=torch.bool, device=device)
-        self.block_capacity = min(horizon, 32)
-        self.block_rows = rows if owned is None else owned.numel()
-        self.block_mask = torch.empty((self.block_capacity, self.block_rows), dtype=torch.bool, device=device)
-        self.block_observations = None
         self.begin()
 
     def begin(self):
@@ -54,47 +55,39 @@ class TimeoutValues:
         self.truncated.zero_()
         self.observations, self.positions = [], []
         self.pending = self.total_rows = self.forward_batches = self.peak_rows = 0
-        self.block_count = 0
 
     def capture(self, step, observation, info):
         observation = observation[..., :self.obs_size]
         mask = info['timeout'].repeat_interleave(self.players)
         self.truncated[step].copy_(mask)
-        if self.block_observations is None:
-            self.block_observations = observation.new_empty((self.block_capacity, self.block_rows, *observation.shape[1:]))
-        if not self.block_count:
-            self.block_start = step
-        if self.owned is None:
-            self.block_observations[self.block_count].copy_(observation)
-            self.block_mask[self.block_count].copy_(mask)
+        timeout_arenas = info.get('timeout_arenas')
+        if timeout_arenas is not None:
+            if not observation.shape[0]:
+                return
+            indices = (timeout_arenas[:, None] * self.players + self.player_offsets).reshape(-1)
+            if self.owned_mask is not None:
+                keep = self.owned_mask.index_select(0, indices)
+                observation = observation[keep]
+                indices = indices[keep]
         else:
-            torch.index_select(observation, 0, self.owned, out=self.block_observations[self.block_count])
-            torch.index_select(mask, 0, self.owned, out=self.block_mask[self.block_count])
-        self.block_count += 1
-        if self.block_count == self.block_capacity:
-            self.collect_block()
-
-    def collect_block(self):
-        if not self.block_count:
+            if self.owned_mask is not None:
+                mask = mask & self.owned_mask
+            indices = mask.nonzero().flatten()
+            if not indices.numel():
+                return
+            observation = observation.index_select(0, indices)
+        count = indices.numel()
+        if not count:
             return
-        masks = self.block_mask[:self.block_count]
-        selected = masks.flatten().nonzero().flatten()
-        if selected.numel():
-            offsets = selected.remainder(self.block_rows)
-            indices = offsets if self.owned is None else self.owned.index_select(0, offsets)
-            positions = (selected.div(self.block_rows, rounding_mode='floor') + self.block_start) * self.rows + indices
-            observations = self.block_observations[:self.block_count].flatten(0, 1).index_select(0, selected)
-            self.observations.append(observations)
-            self.positions.append(positions)
-            self.pending += selected.numel()
-            self.total_rows += selected.numel()
-            self.peak_rows = max(self.peak_rows, self.pending)
-            if self.pending >= self.batch_size:
-                self.flush_pending()
-        self.block_count = 0
+        self.observations.append(observation)
+        self.positions.append(step * self.rows + indices)
+        self.pending += count
+        self.total_rows += count
+        self.peak_rows = max(self.peak_rows, self.pending)
+        if self.pending >= self.batch_size:
+            self.flush_pending()
 
     def flush(self):
-        self.collect_block()
         self.flush_pending()
 
     def flush_pending(self):
