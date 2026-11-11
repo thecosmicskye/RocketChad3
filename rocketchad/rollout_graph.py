@@ -1,3 +1,4 @@
+import functools
 import gc
 import json
 import sys
@@ -35,6 +36,7 @@ def _is_project_module(module):
 
 
 def _scan(roots):
+    root_ids = {id(obj) for obj in roots if obj is not None}
     seen, found, generators, stack = (set(), [], {}, list(roots))
     while stack:
         obj = stack.pop()
@@ -44,25 +46,41 @@ def _scan(roots):
             if obj.device.type == 'cuda':
                 generators[id(obj)] = obj
             continue
-        if callable(obj) and hasattr(obj, '__closure__'):
-            if not hasattr(obj, '__wrapped__') and _is_project_module(getattr(obj, '__module__', None)):
-                seen.add(id(obj))
+        seen.add(id(obj))
+        if isinstance(obj, dict):
+            stack.extend(obj.values())
+            continue
+        if isinstance(obj, (list, tuple, set, frozenset)):
+            stack.extend(obj)
+            continue
+        if isinstance(obj, functools.partial):
+            stack.append(obj.func)
+            stack.extend(obj.args)
+            if obj.keywords:
+                stack.extend(obj.keywords.values())
+            stack.extend(vars(obj).values())
+            continue
+        wrapped = getattr(obj, '__wrapped__', None)
+        if wrapped is not None:
+            stack.append(wrapped)
+        owner = getattr(obj, '__self__', None)
+        if owner is not None:
+            stack.append(owner)
+        func = getattr(obj, '__func__', None)
+        if func is not None:
+            stack.append(func)
+        if hasattr(obj, '__closure__'):
+            if id(obj) in root_ids or _is_project_module(getattr(obj, '__module__', None)):
                 for cell in obj.__closure__ or ():
                     try:
                         stack.append(cell.cell_contents)
                     except ValueError:
                         pass
             continue
-        if not hasattr(obj, '__dict__') or not _is_project_module(getattr(type(obj), '__module__', None)):
-            continue
-        seen.add(id(obj))
-        found.append(obj)
-        stack.extend(vars(obj).values())
+        if hasattr(obj, '__dict__') and (id(obj) in root_ids or _is_project_module(getattr(type(obj), '__module__', None))):
+            found.append(obj)
+            stack.extend(vars(obj).values())
     return (found, list(generators.values()))
-
-
-def _reachable(roots):
-    return _scan(roots)[0]
 
 
 def _state(objects):
@@ -72,7 +90,7 @@ def _state(objects):
             if isinstance(value, torch.Tensor):
                 tensors[id(obj), name] = (obj, value)
             elif isinstance(value, (bool, int, float)):
-                scalars[id(obj), name] = value
+                scalars[id(obj), name] = (type(obj).__name__, type(value), value)
     return (tensors, scalars)
 
 
@@ -87,6 +105,7 @@ class RolloutGraph:
     def __init__(self, roots, physics):
         self.roots = roots
         self.stream = torch.cuda.ExternalStream(physics.stream)
+        self.scalar_warned = False
         self.begin()
 
     def begin(self):
@@ -108,6 +127,12 @@ class RolloutGraph:
             return out
         after, after_scalars = _state(objects)
         if after_scalars != scalars:
+            if not self.scalar_warned:
+                self.scalar_warned = True
+                changed = [f'{(after_scalars.get(key) or scalars[key])[0]}.{key[1]}'
+                           for key in dict.fromkeys((*scalars, *after_scalars))
+                           if scalars.get(key) != after_scalars.get(key)]
+                print(json.dumps(dict(rollout_graph='scalar_changed', attributes=changed)), flush=True)
             return out
         rebound = [(obj, key[1]) for key, (obj, value) in after.items() if tensors.get(key, (None, None))[1] is not value]
         for obj, name in rebound:

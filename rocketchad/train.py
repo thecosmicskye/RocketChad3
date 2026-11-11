@@ -18,7 +18,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 from .environment import Environment
 from .distributed_ppo import normalize_advantages
-from .entropy_band import EntropyBand, MultiModeEntropyBand, make_entropy_band
+from .entropy_band import MultiModeEntropyBand, make_entropy_band
 from .host_rollout import HostObservations
 from .inference import chunked_rollout_forward
 from .learner import Learner, Optimizers
@@ -217,8 +217,10 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                     optimizer = build_optimizer()
                 elif phase.get('reset_critic', False):
                     for component in optimizer.all:
-                        for parameter in critics:
-                            component.state.pop(parameter, None)
+                        state_map = getattr(component, 'state', None)
+                        if isinstance(state_map, dict):
+                            for parameter in critics:
+                                state_map.pop(parameter, None)
                 learner = Learner(model, optimizer, config, critics, world, shared=shared, stream=learner_stream)
                 if opponents is None:
                     env = make_environment()

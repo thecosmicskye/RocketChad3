@@ -24,7 +24,6 @@ def mixed_counts(arenas, fractions):
     return counts
 
 def mode_sizes(eligible, fractions, seed):
-    import torch
     counts = {mode: realized_count(len(eligible), fractions.get(mode, 0)) for mode in (1, 2)}
     available = eligible.nonzero().flatten()
     if sum(counts.values()) > len(available):
@@ -44,7 +43,6 @@ def mode_sizes(eligible, fractions, seed):
 class TeamLayout:
 
     def __init__(self, sizes):
-        import torch
         self.sizes = sizes.clone()
         self.arenas = len(sizes)
         slot = torch.arange(6, device=sizes.device)[None, :]
