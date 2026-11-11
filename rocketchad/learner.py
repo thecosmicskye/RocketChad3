@@ -48,8 +48,7 @@ class Learner:
         self.eager_steps = 0
 
     def _backward(self, inputs):
-        obs, actions, old_log, advantages, returns = inputs
-        stats = accumulate(self.forward, self.config, obs, actions, old_log, advantages, returns)
+        stats = accumulate(self.forward, self.config, *inputs)
         if self.reduce is not None:
             self.reduce()
         return stats

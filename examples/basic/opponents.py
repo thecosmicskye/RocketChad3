@@ -42,6 +42,7 @@ def make_opponents(env, model, config, saved_state=None):
             entry = dict(entry, key=hashlib.sha256(data).hexdigest())
             checkpoint = torch.load(io.BytesIO(data), map_location='cpu', weights_only=True)
             frozen.load_state_dict(checkpoint['model'])
+            entry.setdefault('action_floor', checkpoint.get('config', {}).get('action_floor', 0.0))
         name = entry.get('name') or (Path(entry['path']).stem if 'path' in entry else str(len(members)))
         members.append(dict(entry, name=name, model=frozen))
     fraction = (config['league_fraction'] if watch else config.get('league_fraction', 0.25)) if saved_state is None else saved_state['fraction']
@@ -53,9 +54,13 @@ def make_opponents(env, model, config, saved_state=None):
     pool = pool_type(env, members, fraction, env.seed,
                      precision=config['precision'],
                      model_factory=lambda _: copy.deepcopy(model),
-                     retire_goal_share=config.get('league_retire_goal_share', 0.5),
-                     min_goals=config.get('league_min_goals', 64),
-                     resample_updates=config.get('league_resample_updates', 8), **extra)
+                     retire_goal_share=config.get('league_retire_goal_share'),
+                     min_goals=config.get('league_min_goals', 256),
+                     resample_updates=config.get('league_resample_updates', 8),
+                     pfsp=config.get('league_pfsp', True),
+                     pfsp_power=config.get('league_pfsp_power', 2.0),
+                     pfsp_floor=config.get('league_pfsp_floor', 0.05),
+                     action_floor=config.get('action_floor', 0.0), **extra)
     if watch and saved_state is None:
         pool.poll()
         pool.active.copy_(pool.pending)

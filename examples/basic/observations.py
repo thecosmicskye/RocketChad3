@@ -19,7 +19,7 @@ class Observation:
         self.order = torch.tensor(order, device=device)
         self.present = present[self.order] if self.layout is None else self.layout.ordered_presence(self.order)
         self.pad_order = None
-        if env.config.get('team_pad_frame', False):
+        if env.config.get('team_pad_frame', True):
             half_turn = list(range(27, -1, -1)) + [29, 28, 33, 32, 31, 30]
             self.pad_order = torch.tensor([list(range(34))] * 3 + [half_turn] * 3, device=device)
 
@@ -35,9 +35,9 @@ class Observation:
         n, c, b = env.arenas, env.car, env.ball
         pos, vel, forward, up, angular = (self.pad(c[name].reshape(n, env.players, 3))
                                           for name in ('pos', 'vel', 'basis_forward', 'basis_up', 'ang_vel'))
+        has_flip = (c['is_on_ground'] != 0) | ((c['has_flipped'] == 0) & (c['has_double_jumped'] == 0) & (c['air_time_since_jump'] < 1.25))
         scalars = torch.stack([c['boost'].float() / 100, c['is_on_ground'].float(),
-                               (1 - c['has_double_jumped'].float()) * (1 - c['has_flipped'].float()),
-                               c['is_demoed'].float()], -1).reshape(n, env.players, 4)
+                               has_flip.float(), c['is_demoed'].float()], -1).reshape(n, env.players, 4)
         scalars = self.pad(scalars)
         rot = self.rotation[None, :, None, :]
         cars = torch.cat(((pos[:, self.order] - pos[:, :, None]) * rot / 4096,

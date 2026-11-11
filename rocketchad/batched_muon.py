@@ -1,4 +1,5 @@
 from collections import defaultdict
+from contextlib import nullcontext
 import math
 import torch
 
@@ -46,7 +47,7 @@ class BatchedMuon(torch.optim.Muon):
                 stream = None if ambient is None else streams[key]
                 if stream is not None:
                     stream.wait_stream(ambient)
-                with torch.cuda.stream(stream):
+                with nullcontext() if stream is None else torch.cuda.stream(stream):
                     updates = orthogonalize_batch(torch.stack([g for _, g in entries]), group['ns_coefficients'], group['ns_steps'], group['eps'], self.compute_dtype)
                     scale = 0.2 * math.sqrt(max(shape))
                     for (p, _), update in zip(entries, updates.unbind()):

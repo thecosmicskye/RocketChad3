@@ -1,8 +1,11 @@
 import gc
 import json
+import sys
 import traceback
 from contextlib import contextmanager
 import torch
+
+_SKIP_MODULES = {'builtins', 'torch', 'numpy', 'pathlib', 'rocketgpu_py', 'rocketgpu_py_cuda', '_rocketgpu_start_cache'}
 
 
 @contextmanager
@@ -19,16 +22,47 @@ def capture(graph, **kwargs):
             gc.enable()
 
 
-def _reachable(roots):
-    seen, found, stack = (set(), [], list(roots))
+def _is_project_module(module):
+    if not module:
+        return False
+    if module in ('__main__', '<run_path>') or module.startswith('rocketchad'):
+        return True
+    root = module.split('.')[0]
+    if root.startswith('_') or root in sys.stdlib_module_names or root in _SKIP_MODULES:
+        return False
+    origin = getattr(getattr(sys.modules.get(module), '__spec__', None), 'origin', '') or ''
+    return 'site-packages' not in origin and 'dist-packages' not in origin
+
+
+def _scan(roots):
+    seen, found, generators, stack = (set(), [], {}, list(roots))
     while stack:
         obj = stack.pop()
-        if obj is None or id(obj) in seen or not hasattr(obj, '__dict__'):
+        if obj is None or id(obj) in seen or isinstance(obj, (torch.nn.Module, torch.Tensor, type)):
+            continue
+        if isinstance(obj, torch.Generator):
+            if obj.device.type == 'cuda':
+                generators[id(obj)] = obj
+            continue
+        if callable(obj) and hasattr(obj, '__closure__'):
+            if not hasattr(obj, '__wrapped__') and _is_project_module(getattr(obj, '__module__', None)):
+                seen.add(id(obj))
+                for cell in obj.__closure__ or ():
+                    try:
+                        stack.append(cell.cell_contents)
+                    except ValueError:
+                        pass
+            continue
+        if not hasattr(obj, '__dict__') or not _is_project_module(getattr(type(obj), '__module__', None)):
             continue
         seen.add(id(obj))
         found.append(obj)
-        stack.extend((v for v in vars(obj).values() if type(v).__module__.startswith('rocketchad') and not isinstance(v, torch.nn.Module)))
-    return found
+        stack.extend(vars(obj).values())
+    return (found, list(generators.values()))
+
+
+def _reachable(roots):
+    return _scan(roots)[0]
 
 
 def _state(objects):
@@ -65,7 +99,7 @@ class RolloutGraph:
         elif self.eager:
             out = decide()
         else:
-            objects = _reachable(self.roots)
+            objects, generators = _scan(self.roots)
             tensors, scalars = _state(objects)
             out = decide()
         if note_exposure is not None:
@@ -80,7 +114,7 @@ class RolloutGraph:
             setattr(obj, name, getattr(obj, name).clone())
         buffers = [getattr(obj, name) for obj, name in rebound]
         graph = torch.cuda.CUDAGraph()
-        for generator in {id(g): g for obj in objects for g in vars(obj).values() if isinstance(g, torch.Generator) and g.device.type == 'cuda'}.values():
+        for generator in generators:
             graph.register_generator_state(generator)
         try:
             with capture(graph, stream=self.stream, capture_error_mode='thread_local'):

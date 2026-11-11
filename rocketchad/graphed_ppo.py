@@ -16,15 +16,18 @@ def chunks(rows, microbatch):
         return [(0, rows)]
     return [(b, min(b + microbatch, rows)) for b in range(0, rows, microbatch)]
 
-def accumulate(forward, cfg, obs, actions, old_log, advantages, returns):
+def accumulate(forward, cfg, obs, actions, old_log, advantages, returns, modes=None):
     objective_fn = compiled_objective if cfg.get('graphed_compile', False) else objective
+    floor = float(cfg.get('action_floor', 0.0))
+    entropy_weight = cfg.get('_entropy_tensor', cfg['entropy'])
     parts = chunks(obs.shape[0], cfg.get('microbatch', 0))
     whole = len(parts) == 1
     stats = None
     for b, e in parts:
         o, a, l, v, r = (obs, actions, old_log, advantages, returns) if whole else (obs[b:e], actions[b:e], old_log[b:e], advantages[b:e], returns[b:e])
+        m = modes if whole or modes is None else modes[b:e]
         logits, values = forward(o)
-        loss, part = objective_fn(logits, values, a, l, v, r, cfg['clip'], cfg.get('_entropy_tensor', cfg['entropy']))
+        loss, part = objective_fn(logits, values, a, l, v, r, cfg['clip'], entropy_weight, floor, m)
         if whole:
             loss.backward()
             return part
@@ -57,12 +60,11 @@ class PPOMinibatchGraph:
         self.storage = [x.data_ptr() for x in state_tensors(model, optimizer)]
 
     def eager_step(self, inputs):
-        obs, actions, old_log, advantages, returns = inputs
         self.optimizer.zero_grad()
         for parameter in self.model.parameters():
             if parameter.requires_grad and id(parameter) not in self.optimizer.parameter_ids:
                 parameter.grad = None
-        stats = accumulate(self.forward, self.cfg, obs, actions, old_log, advantages, returns)
+        stats = accumulate(self.forward, self.cfg, *inputs)
         if self.reduce_gradients is not None:
             self.reduce_gradients()
         self.preclip_norm = torch.nn.utils.clip_grad_norm_(self.optimized, 0.5)

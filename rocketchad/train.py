@@ -18,10 +18,11 @@ from torch.nn.parallel import DistributedDataParallel
 
 from .environment import Environment
 from .distributed_ppo import normalize_advantages
-from .entropy_band import EntropyBand
+from .entropy_band import EntropyBand, MultiModeEntropyBand, make_entropy_band
 from .host_rollout import HostObservations
 from .inference import chunked_rollout_forward
 from .learner import Learner, Optimizers
+from .policy_terms import action_log_probs
 from .precision import training_forward
 from .rollout_graph import RolloutGraph
 from .truncation_gae import TimeoutValues, gae as truncation_gae
@@ -83,9 +84,10 @@ def train(config, output, *, make_model, action_table, Observation, reward, make
 
 
 def _train(config, output, example, rank, world, device, make_model, make_optimizer, critic_parameters, make_opponents, resume):
-    entropy_band = EntropyBand(config, device) if config.get('entropy_band') else None
+    entropy_band = make_entropy_band(config, device)
     if entropy_band is not None:
         config['_entropy_tensor'] = entropy_band.tensor
+    action_floor = float(config.get('action_floor', 0.0))
     torch.manual_seed(config['seed'])
     model = make_model().to(device)
     if world > 1:
@@ -147,7 +149,14 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
         full = env.arenas * env.players
         active = opponents.learner_indices if opponents is not None else (
             None if env.team_layout is None else env.team_layout.present.flatten().nonzero().flatten())
-        return full, active, full if active is None else active.numel()
+        rows = full if active is None else active.numel()
+        learner_modes = mode_columns = None
+        if env.team_layout is not None:
+            slot_modes = env.team_layout.sizes.repeat_interleave(env.players)
+            learner_modes = slot_modes if active is None else slot_modes.index_select(0, active)
+            if config.get('per_mode_advantage_norm', True):
+                mode_columns = tuple((learner_modes == mode).nonzero().flatten() for mode in (1, 2, 3))
+        return full, active, rows, learner_modes, mode_columns
 
     saved_opponents = state['rng'][rank].get('opponents') if resume else None
     if saved_opponents is not None:
@@ -170,7 +179,7 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
         started = phase_started = time.monotonic()
         next_save = config['checkpoint_seconds']
         obs = env.observe()
-        full_rows, active, rows = player_rows(env, opponents)
+        full_rows, active, rows, learner_modes, mode_columns = player_rows(env, opponents)
         timeout_values = None
         while True:
             now = time.monotonic()
@@ -198,17 +207,23 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                 phase_previous_seconds = 0.0
                 phase_started = time.monotonic()
                 phase = config['phases'][phase_index]
+                critics = critic_parameters(model)
                 if phase.get('reset_critic', False):
                     with torch.no_grad():
-                        for parameter in critic_parameters(model):
+                        for parameter in critics:
                             parameter.zero_()
-                optimizer = build_optimizer()
-                learner = Learner(model, optimizer, config, critic_parameters(model), world, shared=shared, stream=learner_stream)
+                if phase.get('reset_optimizer', True):
+                    optimizer = build_optimizer()
+                elif phase.get('reset_critic', False):
+                    for component in optimizer.all:
+                        for parameter in critics:
+                            component.state.pop(parameter, None)
+                learner = Learner(model, optimizer, config, critics, world, shared=shared, stream=learner_stream)
                 if opponents is None:
                     env = make_environment()
                     obs = env.observe()
                 rollout_graph = RolloutGraph((env, opponents), env) if config.get('rollout_graph', False) else None
-                full_rows, active, rows = player_rows(env, opponents)
+                full_rows, active, rows, learner_modes, mode_columns = player_rows(env, opponents)
                 timeout_values = None
                 phase_elapsed = 0.0
             if save or stop:
@@ -231,7 +246,7 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
             log_probs = torch.empty((horizon, rows), device=device)
             values, rewards = torch.empty_like(log_probs), torch.empty_like(log_probs)
             dones = torch.empty_like(log_probs, dtype=torch.bool)
-            if config.get('timeout_bootstrap', False):
+            if config.get('timeout_bootstrap', True):
                 if timeout_values is None:
                     timeout_values = TimeoutValues(model, horizon, full_rows, config['minibatch'], device,
                                                    owned=active, obs_size=obs.shape[-1], players=env.players)
@@ -245,7 +260,7 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                     nonlocal obs
                     learner_obs = obs if active is None else obs.index_select(0, active)
                     logits, value = rollout_forward(learner_obs)
-                    log_all = logits.log_softmax(-1)
+                    log_all = action_log_probs(logits, action_floor)
                     probabilities = log_all.exp()
                     action = probabilities.div(torch.empty_like(probabilities).exponential_()).argmax(-1)
                     applied = action if active is None else action.new_zeros(full_rows).index_copy_(0, active, action)
@@ -298,28 +313,31 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                         advantages[index] = running
                         next_value = values[index]
                     returns = advantages + values
-                advantages = normalize_advantages(advantages)
+                advantages = normalize_advantages(advantages, mode_columns=mode_columns)
             torch.cuda.synchronize(device)
             collection_end = time.monotonic()
             flat_obs = observations.flatten(0, 1) if host_observations is None else host_observations.end_rollout(horizon)
-            sources = (flat_obs, actions.flatten(), log_probs.flatten(),
-                       advantages.flatten(), returns.flatten())
-            metrics = torch.zeros(4, device=device)
+            per_mode_entropy = isinstance(entropy_band, MultiModeEntropyBand) and learner_modes is not None
+            flat_modes = (learner_modes - 1).repeat(horizon) if per_mode_entropy else None
+            sources = (flat_obs, actions.flatten(), log_probs.flatten(), advantages.flatten(), returns.flatten(),
+                       *((flat_modes,) if flat_modes is not None else ()))
+            metrics = torch.zeros(10 if flat_modes is not None else 4, device=device)
             count = 0
+            burnin = phase_updates < phase['critic_burnin']
             if host_observations is not None:
                 host_observations.cpu_wait_seconds = 0.0
             for _ in range(config['epochs']):
                 permutation = torch.randperm(horizon * rows, device=device)
                 if host_observations is None:
                     for indices in permutation.split(config['minibatch']):
-                        metrics += learner.step(sources, indices, burnin=phase_updates < phase['critic_burnin'])
+                        metrics += learner.step(sources, indices, burnin=burnin)
                         count += 1
                 else:
                     batches = list(permutation.split(config['minibatch']))
                     groups = (batches[:-1], batches[-1:]) if len(batches[-1]) != config['minibatch'] else (batches,)
                     for group in groups:
                         for _, indices, obs_rows, _ in host_observations.epoch(flat_obs, group, None):
-                            metrics += learner.step(sources, indices, burnin=phase_updates < phase['critic_burnin'], obs=obs_rows)
+                            metrics += learner.step(sources, indices, burnin=burnin, obs=obs_rows)
                             count += 1
             phase_updates += 1
             updates += 1
@@ -329,12 +347,16 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
             torch.cuda.synchronize(device)
             mean_metrics = metrics / (count * world)
             entropy_weight = entropy_band.weight if entropy_band is not None else None
-            if entropy_band is not None:
-                entropy_band.update(mean_metrics[2].item())
+            mode_entropy = None
+            if flat_modes is not None:
+                mode_entropy = {mode + 1: (mean_metrics[4 + mode] / mean_metrics[7 + mode]).item()
+                                if mean_metrics[7 + mode] > 0 else None for mode in range(3)}
+            if entropy_band is not None and not burnin:
+                entropy_band.update(mode_entropy if flat_modes is not None else mean_metrics[2].item())
             opponent_metrics = None if opponents is None else opponents.end_rollout(world)
             if rank == 0:
                 total_seconds = time.monotonic() - iteration_started
-                policy_loss, value_loss, entropy, kl = mean_metrics.tolist()
+                policy_loss, value_loss, entropy, kl = mean_metrics[:4].tolist()
                 metrics_row = dict(phase=phase['name'], update=updates, player_steps=steps,
                                    elapsed_seconds=previous_seconds + time.monotonic() - started,
                                    player_steps_per_second=horizon * rows * world / total_seconds,
@@ -343,6 +365,8 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                 if entropy_band is not None:
                     metrics_row.update(entropy_weight=entropy_weight, entropy_weight_next=entropy_band.weight,
                                        entropy_ema=entropy_band.ema)
+                if mode_entropy is not None:
+                    metrics_row['mode_entropy'] = {mode: value for mode, value in mode_entropy.items() if value is not None}
                 if opponent_metrics is not None:
                     metrics_row['opponents'] = opponent_metrics
                 print(json.dumps(metrics_row), flush=True)
