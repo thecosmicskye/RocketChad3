@@ -78,7 +78,9 @@ class Environment:
             self.goal_telemetry = GoalTelemetry(self.sim, self.device, self.tick_skip)
         self.actions = example['action_table'](self.device)
         self.observation = example['Observation'](self)
-        self.subset_observe = len(inspect.signature(self.observation).parameters) >= 2
+        arenas_param = inspect.signature(self.observation).parameters.get('arenas')
+        self.subset_observe = (arenas_param is not None and arenas_param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY))
         self.reward = example['reward']
         self.terminal_condition = example['terminal_condition']
         self.last_action = torch.zeros((self.arenas, self.players, 8), device=self.device)
@@ -91,13 +93,29 @@ class Environment:
         self.env_ids = torch.arange(self.arenas, device=self.device, dtype=torch.int64)
         self.commands = torch.zeros((self.arenas, 2), dtype=torch.int64, device=self.device)
         self.opponents = None
+        self.fixed_timeouts = True
         self.set_state = example['make_state_setter'](self)
         if initialize:
             self.initialize()
 
     def initialize(self):
+        age_ref, timeouts_ref = self.age, self.timeouts
+        age_version, timeouts_version = self.age._version, self.timeouts._version
         with torch.no_grad():
             self.set_state(torch.ones(self.arenas, dtype=torch.bool, device=self.device))
+        self.fixed_timeouts = (self.age is age_ref and self.timeouts is timeouts_ref and
+                               self.age._version == age_version and self.timeouts._version == timeouts_version)
+
+    def timeout_schedule(self, steps):
+        if not self.subset_observe or not self.fixed_timeouts or self.episode_steps < 1:
+            return None
+        window = min(steps, 32, self.episode_steps)
+        bucket = (self.timeouts - self.age - 1).clamp(0, window)
+        order = bucket.argsort(stable=True)
+        counts = torch.zeros(window + 1, dtype=torch.int64, device=self.device)
+        counts.scatter_add_(0, bucket, torch.ones_like(bucket))
+        sizes = counts[:window].tolist()
+        return order[:sum(sizes)].split(sizes)
 
     def observe(self):
         return self.observation(self)
@@ -137,13 +155,14 @@ class Environment:
         timeout = (self.age >= self.timeouts) & ~terminal
         done = terminal | timeout
         self.goal_inside.copy_((self.ball['pos'][:, 1].abs() > self.goal_threshold) & ~done)
-        if capture_transition or capture_info:
+        want_transition = isinstance(capture_transition, torch.Tensor) or bool(capture_transition)
+        if want_transition or capture_info:
             info = dict(timeout=timeout, blue_goals=blue, orange_goals=orange)
-            if capture_transition == 'timeout' and self.subset_observe:
-                timeout_arenas = timeout.nonzero().flatten()
-                info['timeout_arenas'] = timeout_arenas
-                info['transition_observation'] = self.observation(self, timeout_arenas)
-            elif capture_transition:
+            if isinstance(capture_transition, torch.Tensor):
+                info['timeout_arenas'] = capture_transition
+                info['transition_observation'] = (self.observation(self, arenas=capture_transition)
+                                                  if capture_transition.numel() else None)
+            elif want_transition:
                 info['transition_observation'] = self.observe().clone()
         self.reset_count.add_(done)
         self.commands[:, 0] = done.to(torch.int64) * ((1 << 0) | (1 << 8) | (1 << 16))
@@ -152,9 +171,14 @@ class Environment:
         self.age.masked_fill_(done, 0)
         self.timeouts.masked_fill_(done, self.episode_steps)
         self.last_action.masked_fill_(done[:, None, None], 0)
+        age_ref, timeouts_ref = self.age, self.timeouts
+        age_version, timeouts_version = self.age._version, self.timeouts._version
         self.set_state(done)
+        if not (self.age is age_ref and self.timeouts is timeouts_ref and
+                self.age._version == age_version and self.timeouts._version == timeouts_version):
+            self.fixed_timeouts = False
         result = (self.observe(), reward, done.repeat_interleave(self.players))
-        return (*result, info) if capture_transition or capture_info else result
+        return (*result, info) if want_transition or capture_info else result
 
     def close(self):
         torch.cuda.synchronize(self.device)

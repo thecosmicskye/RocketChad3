@@ -50,8 +50,9 @@ class Observation:
             n = arenas.numel()
             if not n:
                 return env.last_action.new_empty((0, self.size))
-            pos, vel, forward, up, angular = (self.pad(c[name].reshape(total, p, 3).index_select(0, arenas), arenas)
-                                              for name in ('pos', 'vel', 'basis_forward', 'basis_up', 'ang_vel'))
+            vectors = torch.stack([c[name].reshape(total, p, 3).index_select(0, arenas)
+                                   for name in ('pos', 'vel', 'basis_forward', 'basis_up', 'ang_vel')], 2)
+            pos, vel, forward, up, angular = self.pad(vectors, arenas).unbind(2)
             sub = lambda name: c[name].reshape(total, p).index_select(0, arenas)
             on_ground = sub('is_on_ground')
             has_flip = (on_ground != 0) | ((sub('has_flipped') == 0) & (sub('has_double_jumped') == 0) & (sub('air_time_since_jump') < 1.25))

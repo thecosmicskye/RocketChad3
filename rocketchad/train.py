@@ -250,17 +250,19 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
             values, rewards = torch.empty_like(log_probs), torch.empty_like(log_probs)
             dones = torch.empty_like(log_probs, dtype=torch.bool)
             if phase.get('timeout_bootstrap', config.get('timeout_bootstrap', False)):
+                single_steps = env.episode_steps if env.fixed_timeouts else None
                 if timeout_values is None:
                     timeout_values = TimeoutValues(model, horizon, full_rows, config['minibatch'], device,
                                                    owned=active, obs_size=obs.shape[-1], players=env.players,
-                                                   forward=timeout_forward)
-                timeout_values.begin()
+                                                   forward=timeout_forward, episode_steps=single_steps)
+                timeout_values.begin(episode_steps=single_steps)
             else:
                 timeout_values = None
             iteration_started = time.monotonic()
             with torch.no_grad():
                 if rollout_graph is not None:
                     rollout_graph.begin()
+                capture_mode = False
 
                 def decide():
                     nonlocal obs
@@ -276,8 +278,6 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                         following, reward_value, done = env.step(applied, phase['name'])
                         info = None
                     else:
-                        capture_mode = (('full' if rollout_graph is not None and not rollout_graph.eager else 'timeout')
-                                        if timeout_values is not None else False)
                         following, reward_value, done, info = env.step(applied, phase['name'],
                             capture_transition=capture_mode, capture_info=opponents is not None)
                     if opponents is not None:
@@ -290,18 +290,33 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                         obs.copy_(following)
                     return action, log_all.gather(-1, action[:, None]).squeeze(-1), value, reward_value, done, info
 
+                schedule = None
+                schedule_start = 0
                 for index in range(horizon):
                     learner_obs = obs if active is None else obs.index_select(0, active)
                     if host_observations is None:
                         observations[index].copy_(learner_obs)
                     else:
                         host_observations.record(index, learner_obs)
+                    if timeout_values is not None:
+                        if rollout_graph is not None and not rollout_graph.eager:
+                            capture_mode = True
+                        elif env.subset_observe and env.fixed_timeouts:
+                            if schedule is None or index - schedule_start >= len(schedule):
+                                if index:
+                                    timeout_values.collect_block()
+                                schedule = env.timeout_schedule(horizon - index)
+                                schedule_start = index
+                            capture_mode = schedule[index - schedule_start] if schedule is not None else True
+                        else:
+                            capture_mode = True
                     action, log_prob, value, reward_value, done, info = decide() if rollout_graph is None else rollout_graph(decide)
                     actions[index] = action
                     log_probs[index] = log_prob
                     values[index], rewards[index], dones[index] = value, reward_value, done
                     if timeout_values is not None:
-                        timeout_values.capture(index, info['transition_observation'], info)
+                        timeout_values.capture(index, info['transition_observation'], info,
+                                               episode_steps=env.episode_steps if env.fixed_timeouts else None)
                 learner_obs = obs if active is None else obs.index_select(0, active)
                 _, next_value = rollout_forward(learner_obs)
                 if timeout_values is not None:

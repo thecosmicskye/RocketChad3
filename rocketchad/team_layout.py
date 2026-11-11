@@ -63,8 +63,8 @@ class TeamLayout:
             selected = values[self.environment_index, indices]
             mask = absent
         else:
-            idx = indices.index_select(0, arenas)
-            selected = values[torch.arange(len(arenas), device=values.device)[:, None], idx]
+            idx = indices.index_select(0, arenas).reshape(len(arenas), 6, *([1] * (values.ndim - 2)))
+            selected = values.gather(1, idx.expand(len(arenas), 6, *values.shape[2:]))
             mask = absent.index_select(0, arenas)
         return selected.masked_fill_(mask.reshape(len(selected), 6, *[1] * (values.ndim - 2)), 0)
 
