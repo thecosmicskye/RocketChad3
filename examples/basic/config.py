@@ -52,7 +52,7 @@ CONFIG = {
     'minibatch': 8192, 'microbatch': 0, 'epochs': 1, 'clip': 0.2, 'entropy': 0.01,
     'graphed_compile': False, 'rollout_compile': False, 'rollout_graph': False,
     'rollout_forward_rows': 0, 'rollout_host_obs': False, 'compile_obs': False,
-    'timeout_bootstrap': True, 'team_pad_frame': True,
+    'timeout_bootstrap': False, 'team_pad_frame': True,
     'optimizer': 'muon', 'adam_lr': 0.0003, 'adamw_lr': 0.0003, 'muon_lr': 0.001, 'optimizer_eps': 1e-5,
     'muon_momentum': 0.95, 'muon_ns_steps': 5, 'weight_decay': 0.0,
     'precision': 'bf16', 'seed': 1, 'checkpoint_seconds': 600, 'seconds': 0,

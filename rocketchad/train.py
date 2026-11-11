@@ -128,7 +128,7 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
             shared = DistributedDataParallel(shared, device_ids=[device.index], broadcast_buffers=False,
                                              gradient_as_bucket_view=True, static_graph=True)
         torch.cuda.current_stream(device).wait_stream(learner_stream)
-    learner = Learner(model, optimizer, config, critic_parameters(model), world, shared=shared, stream=learner_stream)
+    learner = Learner(model, optimizer, config, tuple(critic_parameters(model)), world, shared=shared, stream=learner_stream)
     rollout_forward = training_forward(model, config['precision'])
     if config.get('rollout_compile', False):
         rollout_forward = torch.compile(rollout_forward, dynamic=True, options=FUSED_AUTOTUNE)
@@ -207,7 +207,7 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                 phase_previous_seconds = 0.0
                 phase_started = time.monotonic()
                 phase = config['phases'][phase_index]
-                critics = critic_parameters(model)
+                critics = tuple(critic_parameters(model))
                 if phase.get('reset_critic', False):
                     with torch.no_grad():
                         for parameter in critics:
@@ -246,11 +246,13 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
             log_probs = torch.empty((horizon, rows), device=device)
             values, rewards = torch.empty_like(log_probs), torch.empty_like(log_probs)
             dones = torch.empty_like(log_probs, dtype=torch.bool)
-            if config.get('timeout_bootstrap', True):
+            if phase.get('timeout_bootstrap', config.get('timeout_bootstrap', False)):
                 if timeout_values is None:
                     timeout_values = TimeoutValues(model, horizon, full_rows, config['minibatch'], device,
                                                    owned=active, obs_size=obs.shape[-1], players=env.players)
                 timeout_values.begin()
+            else:
+                timeout_values = None
             iteration_started = time.monotonic()
             with torch.no_grad():
                 if rollout_graph is not None:
