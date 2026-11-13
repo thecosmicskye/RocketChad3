@@ -340,6 +340,11 @@ def _train(config, output, example, rank, world, device, make_model, make_optimi
                                    player_steps_per_second=horizon * rows * world / total_seconds,
                                    collection_seconds=collection_end - iteration_started,
                                    policy_loss=policy_loss, value_loss=value_loss, entropy=entropy, approx_kl=kl)
+                # Ball velocity toward each goal (positive part), mean over arenas, uu/s.
+                goals = env.ball['pos'].new_tensor([[0.0, 6000.0, 0.0], [0.0, -6000.0, 0.0]])
+                delta = goals[None] - env.ball['pos'][:, None, :]
+                toward = (env.ball['vel'][:, None, :] * delta / delta.norm(dim=-1, keepdim=True).clamp_min(1e-6)).sum(-1)
+                metrics_row['velocity_uu_per_second'] = toward.clamp_min(0).mean().item()
                 if entropy_band is not None:
                     metrics_row.update(entropy_weight=entropy_weight, entropy_weight_next=entropy_band.weight,
                                        entropy_ema=entropy_band.ema)
