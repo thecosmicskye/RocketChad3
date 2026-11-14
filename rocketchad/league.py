@@ -1,19 +1,23 @@
+import math
 import torch
 import torch.distributed as dist
 
+from .policy_terms import action_log_probs
 from .precision import training_forward
 
 STARTS = {'mixed': 0, 'kickoff': 1, 'replay': 2}
 
 
-def sample(logits):
-    probabilities = logits.log_softmax(-1).exp()
+def sample(logits, action_floor=0.0):
+    probabilities = action_log_probs(logits, action_floor).exp()
     return probabilities.div(torch.empty_like(probabilities).exponential_()).argmax(-1)
 
 
 class LeaguePool:
     def __init__(self, env, members, fraction, seed, *, precision='bf16',
-                 retire_goal_share=None, min_goals=64, resample_updates=8, model_factory=None):
+                 retire_goal_share=None, min_goals=256, resample_updates=8,
+                 pfsp=True, pfsp_power=2.0, pfsp_floor=0.05, pfsp_prior=4.0,
+                 ema_goals=128.0, action_floor=0.0, model_factory=None):
         self.members = []
         seen = set()
         for member in members:
@@ -25,6 +29,9 @@ class LeaguePool:
         self.fraction = fraction
         self.retire_goal_share, self.min_goals = retire_goal_share, min_goals
         self.resample_updates = resample_updates
+        self.pfsp, self.pfsp_power = pfsp, float(pfsp_power)
+        self.pfsp_floor, self.pfsp_prior = float(pfsp_floor), float(pfsp_prior)
+        self.ema_goals, self.action_floor = float(ema_goals), float(action_floor)
         self.generator = torch.Generator().manual_seed(seed)
         for member in self.members:
             member['model'].to(env.device).eval().requires_grad_(False)
@@ -33,6 +40,7 @@ class LeaguePool:
         self.beaten = set()
         self.tried = [False] * len(self.members)
         self.totals = [[0, 0] for _ in self.members]
+        self.ema = [[0.0, 0.0] for _ in self.members]
         self.stats = torch.zeros((len(self.members), 3), device=env.device)
         self.start_modes = torch.tensor([0] + [STARTS[m.get('starts', 'mixed')] for m in self.members], device=env.device)
         self.active = torch.full((env.arenas,), -1, dtype=torch.int64, device=env.device)
@@ -62,6 +70,7 @@ class LeaguePool:
             self.retired.append(False)
             self.tried.append(False)
             self.totals.append([0, 0])
+            self.ema.append([0.0, 0.0])
             self.stats = torch.cat((self.stats, self.stats.new_zeros((1, 3))))
             self.start_modes = torch.cat((self.start_modes, self.start_modes.new_tensor([STARTS[member.get('starts', 'mixed')]])))
             added += 1
@@ -89,6 +98,14 @@ class LeaguePool:
     def supports_start(self, member):
         return member.get('starts', 'mixed') != 'replay' or member.get('team_size', 3) in self.replay_modes
 
+    def _member_weight(self, index):
+        base = float(self.members[index].get('weight', 1.0))
+        if not self.pfsp:
+            return base
+        ef, ea = self.ema[index]
+        share = (ef + self.pfsp_prior) / (ef + ea + 2.0 * self.pfsp_prior)
+        return base * (max(0.0, 1.0 - share) ** self.pfsp_power + self.pfsp_floor)
+
     def draw(self):
         modes = self.arena_modes.cpu().tolist()
         league = self.league_mask.cpu().tolist()
@@ -113,6 +130,7 @@ class LeaguePool:
             self.retired = [self.retired[i] for i in keep]
             self.tried = [self.tried[i] for i in keep]
             self.totals = [self.totals[i] for i in keep]
+            self.ema = [self.ema[i] for i in keep]
             self.stats = self.stats[keep]
             self.start_modes = self.start_modes[[0] + [i + 1 for i in keep]]
             active = {new for new, old in enumerate(keep) if old in active}
@@ -135,7 +153,7 @@ class LeaguePool:
             eligible = [i for i in matching if not self.retired[i]]
             if not arenas or not eligible:
                 continue
-            weights = torch.tensor([self.members[i].get('weight', 1.0) for i in eligible], dtype=torch.float64)
+            weights = torch.tensor([self._member_weight(i) for i in eligible], dtype=torch.float64)
             draws = torch.multinomial(weights, len(arenas), replacement=True, generator=self.generator).tolist()
             untried = [i for i in eligible if not self.tried[i]]
             for index, member in enumerate(untried[:len(draws)]):
@@ -164,13 +182,14 @@ class LeaguePool:
         samples = []
         for index, (member, rows, _) in enumerate(self.groups):
             forward = current_forward if member < 0 else self.forward[member]
+            floor = self.action_floor if member < 0 else float(self.members[member].get('action_floor', 0.0))
             inputs = observations.index_select(0, rows)
             if streams is None:
-                samples.append(sample(forward(inputs)[0]))
+                samples.append(sample(forward(inputs)[0], floor))
                 continue
             streams[index].wait_stream(origin)
             with torch.cuda.stream(streams[index]):
-                samples.append(sample(forward(inputs)[0]))
+                samples.append(sample(forward(inputs)[0], floor))
         if streams is not None:
             for stream in streams[:len(self.groups)]:
                 origin.wait_stream(stream)
@@ -205,6 +224,12 @@ class LeaguePool:
             self.tried[i] |= played > 0
             self.totals[i][0] += int(goals_for)
             self.totals[i][1] += int(goals_against)
+            goals = goals_for + goals_against
+            if goals > 0:
+                decay = math.exp(-goals / self.ema_goals)
+                scale = self.ema_goals * (1.0 - decay) / goals
+                self.ema[i] = [decay * self.ema[i][0] + scale * goals_for,
+                               decay * self.ema[i][1] + scale * goals_against]
             total = sum(self.totals[i])
             share = self.totals[i][0] / total if total else None
             if (share is not None and self.retire_goal_share is not None and total >= self.min_goals
@@ -221,6 +246,7 @@ class LeaguePool:
         result = [dict(name=member.get('name', str(i)), goals_for=self.totals[i][0],
                        goals_against=self.totals[i][1],
                        goal_share=self.totals[i][0] / sum(self.totals[i]) if sum(self.totals[i]) else None,
+                       ema_goal_share=self.ema[i][0] / sum(self.ema[i]) if sum(self.ema[i]) else None,
                        retired=self.retired[i]) for i, member in enumerate(self.members)]
         waiting = any(member.get('departing') or (self.retired[i] and member.get('retry', False)
                       and member['key'] not in self.beaten)
@@ -232,7 +258,7 @@ class LeaguePool:
 
     def state_dict(self):
         return dict(pending=self.pending.cpu(), retired=self.retired,
-                    beaten=list(self.beaten), tried=self.tried, totals=self.totals,
+                    beaten=list(self.beaten), tried=self.tried, totals=self.totals, ema=self.ema,
                     rng=self.generator.get_state(), fraction=self.fraction,
                     members=[{key: value for key, value in member.items() if key != 'model'}
                              for member in self.members])
@@ -259,6 +285,14 @@ class LeaguePool:
                 self.pending.masked_fill_(self.pending == i, -1)
         self.active.copy_(self.pending)
         self.retired, self.tried, self.totals = state['retired'], state['tried'], state['totals']
+        if 'ema' in state:
+            self.ema = [list(pair) for pair in state['ema']]
+        else:
+            self.ema = []
+            for gf, ga in self.totals:
+                total = gf + ga
+                scale = self.ema_goals * (1.0 - math.exp(-total / self.ema_goals)) / total if total > 0 else 0.0
+                self.ema.append([scale * gf, scale * ga])
         self.beaten = set(state['beaten'])
         self.generator.set_state(state['rng'])
 

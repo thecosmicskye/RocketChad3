@@ -1,8 +1,12 @@
+import functools
 import gc
 import json
+import sys
 import traceback
 from contextlib import contextmanager
 import torch
+
+_SKIP_MODULES = {'builtins', 'torch', 'numpy', 'pathlib', 'rocketgpu_py', 'rocketgpu_py_cuda', '_rocketgpu_start_cache'}
 
 
 @contextmanager
@@ -19,16 +23,64 @@ def capture(graph, **kwargs):
             gc.enable()
 
 
-def _reachable(roots):
-    seen, found, stack = (set(), [], list(roots))
+def _is_project_module(module):
+    if not module:
+        return False
+    if module in ('__main__', '<run_path>') or module.startswith('rocketchad'):
+        return True
+    root = module.split('.')[0]
+    if root.startswith('_') or root in sys.stdlib_module_names or root in _SKIP_MODULES:
+        return False
+    origin = getattr(getattr(sys.modules.get(module), '__spec__', None), 'origin', '') or ''
+    return 'site-packages' not in origin and 'dist-packages' not in origin
+
+
+def _scan(roots):
+    root_ids = {id(obj) for obj in roots if obj is not None}
+    seen, found, generators, stack = (set(), [], {}, list(roots))
     while stack:
         obj = stack.pop()
-        if obj is None or id(obj) in seen or not hasattr(obj, '__dict__'):
+        if obj is None or id(obj) in seen or isinstance(obj, (torch.nn.Module, torch.Tensor, type)):
+            continue
+        if isinstance(obj, torch.Generator):
+            if obj.device.type == 'cuda':
+                generators[id(obj)] = obj
             continue
         seen.add(id(obj))
-        found.append(obj)
-        stack.extend((v for v in vars(obj).values() if type(v).__module__.startswith('rocketchad') and not isinstance(v, torch.nn.Module)))
-    return found
+        if isinstance(obj, dict):
+            stack.extend(obj.values())
+            continue
+        if isinstance(obj, (list, tuple, set, frozenset)):
+            stack.extend(obj)
+            continue
+        if isinstance(obj, functools.partial):
+            stack.append(obj.func)
+            stack.extend(obj.args)
+            if obj.keywords:
+                stack.extend(obj.keywords.values())
+            stack.extend(vars(obj).values())
+            continue
+        wrapped = getattr(obj, '__wrapped__', None)
+        if wrapped is not None:
+            stack.append(wrapped)
+        owner = getattr(obj, '__self__', None)
+        if owner is not None:
+            stack.append(owner)
+        func = getattr(obj, '__func__', None)
+        if func is not None:
+            stack.append(func)
+        if hasattr(obj, '__closure__'):
+            if id(obj) in root_ids or _is_project_module(getattr(obj, '__module__', None)):
+                for cell in obj.__closure__ or ():
+                    try:
+                        stack.append(cell.cell_contents)
+                    except ValueError:
+                        pass
+            continue
+        if hasattr(obj, '__dict__') and (id(obj) in root_ids or _is_project_module(getattr(type(obj), '__module__', None))):
+            found.append(obj)
+            stack.extend(vars(obj).values())
+    return (found, list(generators.values()))
 
 
 def _state(objects):
@@ -38,7 +90,7 @@ def _state(objects):
             if isinstance(value, torch.Tensor):
                 tensors[id(obj), name] = (obj, value)
             elif isinstance(value, (bool, int, float)):
-                scalars[id(obj), name] = value
+                scalars[id(obj), name] = (type(obj).__name__, type(value), value)
     return (tensors, scalars)
 
 
@@ -53,6 +105,7 @@ class RolloutGraph:
     def __init__(self, roots, physics):
         self.roots = roots
         self.stream = torch.cuda.ExternalStream(physics.stream)
+        self.scalar_warned = False
         self.begin()
 
     def begin(self):
@@ -65,7 +118,7 @@ class RolloutGraph:
         elif self.eager:
             out = decide()
         else:
-            objects = _reachable(self.roots)
+            objects, generators = _scan(self.roots)
             tensors, scalars = _state(objects)
             out = decide()
         if note_exposure is not None:
@@ -74,13 +127,19 @@ class RolloutGraph:
             return out
         after, after_scalars = _state(objects)
         if after_scalars != scalars:
+            if not self.scalar_warned:
+                self.scalar_warned = True
+                changed = [f'{(after_scalars.get(key) or scalars[key])[0]}.{key[1]}'
+                           for key in dict.fromkeys((*scalars, *after_scalars))
+                           if scalars.get(key) != after_scalars.get(key)]
+                print(json.dumps(dict(rollout_graph='scalar_changed', attributes=changed)), flush=True)
             return out
         rebound = [(obj, key[1]) for key, (obj, value) in after.items() if tensors.get(key, (None, None))[1] is not value]
         for obj, name in rebound:
             setattr(obj, name, getattr(obj, name).clone())
         buffers = [getattr(obj, name) for obj, name in rebound]
         graph = torch.cuda.CUDAGraph()
-        for generator in {id(g): g for obj in objects for g in vars(obj).values() if isinstance(g, torch.Generator) and g.device.type == 'cuda'}.values():
+        for generator in generators:
             graph.register_generator_state(generator)
         try:
             with capture(graph, stream=self.stream, capture_error_mode='thread_local'):

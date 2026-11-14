@@ -71,11 +71,14 @@ class EntityAttentionActorCritic(nn.Module):
     def encode(self, obs):
         leading = obs.shape[:-1]
         obs = obs.reshape(-1, 168)
-        cars = self.car_encoder(obs[:, 12:126].reshape(-1, 6, 19))
+        raw_cars = obs[:, 12:126].reshape(-1, 6, 19)
+        cars = self.car_encoder(raw_cars)
         ball = self.ball_encoder(obs[:, 3:12]).unsqueeze(1)
         context = self.context_encoder(torch.cat((obs[:, :3], obs[:, 126:]), -1)).unsqueeze(1)
         tokens = torch.cat((cars, ball, context), 1) + self.types(self.type_ids)
-        return (leading, self.read_tokens(tokens))
+        ones = torch.ones((len(obs), 1), dtype=torch.bool, device=obs.device)
+        present = torch.cat((ones, raw_cars[:, 1:, 6:12].ne(0).any(-1), ones, ones), 1)
+        return (leading, self.read_tokens(tokens, present))
 
     def forward(self, obs):
         leading, features = self.encode(obs)

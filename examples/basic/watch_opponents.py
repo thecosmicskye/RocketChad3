@@ -21,7 +21,13 @@ class WatchingLeague(LeaguePool):
         room = limit - len(self.members)
         mode = self.watch.get('team_size', 3)
         starts = self.watch.get('starts', 'mixed')
-        replace = self.watch.get('replace_weakest', False) and not any(m.get('departing') for m in self.members)
+        scores = [((self.ema[i][0] / sum(self.ema[i]) if sum(self.ema[i]) else goals[0] / sum(goals)), i)
+                  for i, goals in enumerate(self.totals)
+                  if sum(goals) and sum(goals) >= self.min_goals and not self.retired[i]
+                  and not self.members[i].get('retry', False)
+                  and self.members[i].get('team_size', 3) == mode]
+        replace = (self.watch.get('replace_weakest', False) and bool(scores)
+                   and not any(m.get('departing') for m in self.members))
         known = self.beaten | {m['key'] for m in self.members if m.get('team_size', 3) == mode}
         candidates = [None]
         if rank == 0:
@@ -62,20 +68,21 @@ class WatchingLeague(LeaguePool):
                 self.seen[path] = stamp
                 continue
             if room <= 0:
-                scores = [(goals[0] / sum(goals), i) for i, goals in enumerate(self.totals)
-                          if sum(goals) and not self.retired[i] and not self.members[i].get('retry', False)
-                          and self.members[i].get('team_size', 3) == mode]
                 if scores:
                     self.remove_member(max(scores)[1])
+                    scores = []
+                    replace = False
                     room = limit - len(self.members)
                 if room <= 0:
                     break
             entry = dict(path=path, key=key, name=Path(path).stem,
-                         team_size=mode, starts=starts, retry=False)
+                         team_size=mode, starts=starts, retry=self.watch.get('retry', False))
             model, error = None, None
             try:
                 model = self.model_factory(entry).to(self.env.device).eval().requires_grad_(False)
-                model.load_state_dict(torch.load(io.BytesIO(data), map_location='cpu', weights_only=True)['model'])
+                checkpoint = torch.load(io.BytesIO(data), map_location='cpu', weights_only=True)
+                model.load_state_dict(checkpoint['model'])
+                entry.setdefault('action_floor', checkpoint.get('config', {}).get('action_floor', 0.0))
             except Exception as exc:
                 error = (f'{type(exc).__name__}: {exc}', isinstance(exc, (MemoryError, torch.cuda.OutOfMemoryError)))
                 del model

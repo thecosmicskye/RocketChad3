@@ -1,4 +1,5 @@
 import math
+import torch
 
 def realized_count(arenas, fraction, quantum=16):
     count = int(arenas * fraction) // quantum * quantum
@@ -23,7 +24,6 @@ def mixed_counts(arenas, fractions):
     return counts
 
 def mode_sizes(eligible, fractions, seed):
-    import torch
     counts = {mode: realized_count(len(eligible), fractions.get(mode, 0)) for mode in (1, 2)}
     available = eligible.nonzero().flatten()
     if sum(counts.values()) > len(available):
@@ -43,7 +43,6 @@ def mode_sizes(eligible, fractions, seed):
 class TeamLayout:
 
     def __init__(self, sizes):
-        import torch
         self.sizes = sizes.clone()
         self.arenas = len(sizes)
         slot = torch.arange(6, device=sizes.device)[None, :]
@@ -59,12 +58,18 @@ class TeamLayout:
         self.physical_to_logical = self.physical_to_logical.clamp(0, 5)
         self.environment_index = torch.arange(self.arenas, device=sizes.device)[:, None]
 
-    def _transform(self, values, indices, absent):
-        selected = values[self.environment_index, indices]
-        return selected.masked_fill_(absent.reshape(self.arenas, 6, *[1] * (values.ndim - 2)), 0)
+    def _transform(self, values, indices, absent, arenas=None):
+        if arenas is None:
+            selected = values[self.environment_index, indices]
+            mask = absent
+        else:
+            idx = indices.index_select(0, arenas).reshape(len(arenas), 6, *([1] * (values.ndim - 2)))
+            selected = values.gather(1, idx.expand(len(arenas), 6, *values.shape[2:]))
+            mask = absent.index_select(0, arenas)
+        return selected.masked_fill_(mask.reshape(len(selected), 6, *[1] * (values.ndim - 2)), 0)
 
-    def to_logical(self, physical_values):
-        return self._transform(physical_values, self.logical_to_physical, self.absent)
+    def to_logical(self, physical_values, arenas=None):
+        return self._transform(physical_values, self.logical_to_physical, self.absent, arenas)
 
     def to_physical(self, logical_values):
         return self._transform(logical_values, self.physical_to_logical, self.physical_absent)

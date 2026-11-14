@@ -22,7 +22,10 @@ from rewards import reward
 # are 3v3 arenas. Custom observations and rewards should return six rows per
 # arena; env.team_layout identifies active slots and env.logical_car_field
 # maps car data into blue-three, orange-three order.
-# Set 'team_pad_frame': True to orient boost-pad states to each team's view.
+# For mixed car bodies at kickoff, add 'car_bodies': ('Octane', 'Dominus', 'Plank',
+# 'Breakout', 'Hybrid', 'Merc'), or a dict of body: weight. Each car keeps one
+# body for the run; env.car_body [arenas, car slots] indexes env.car_bodies.
+# Boost-pad states are oriented to each team's view ('team_pad_frame': True).
 # Use the same setting as resumed checkpoints and opponents.
 # To train against saved policies, add 'opponents': [{'path': 'checkpoint.pt',
 # 'team_size': 3, 'retry': True}] and 'league_fraction': 0.25. The fraction
@@ -33,8 +36,8 @@ from rewards import reward
 # Publish checkpoint files atomically. The member limit includes draining and
 # retryable opponents; see watch_opponents.py for polling and start options.
 # Add 'replace_weakest': True inside opponent_watch to rotate the same-mode
-# non-retry opponent with the highest learner goal share when a new checkpoint
-# appears. Opponents without goals are left alone.
+# non-retry opponent with the highest learner goal share once it reaches
+# league_min_goals.
 # The new checkpoint gets a chance; its strength is not known until it plays.
 # Multi-GPU models must use every optimized parameter on every rank.
 # To use standard DDP, set 'grad_reduce': 'ddp', leave microbatch at 0, and use
@@ -51,7 +54,8 @@ CONFIG = {
     'arenas': 8192, 'team_size': 3, 'tick_skip': 8, 'episode_seconds': 30,
     'minibatch': 8192, 'microbatch': 0, 'epochs': 1, 'clip': 0.2, 'entropy': 0.01,
     'graphed_compile': False, 'rollout_compile': False, 'rollout_graph': False,
-    'rollout_forward_rows': 0, 'rollout_host_obs': False, 'compile_obs': False, 'timeout_bootstrap': False,
+    'rollout_forward_rows': 0, 'rollout_host_obs': False, 'compile_obs': False,
+    'timeout_bootstrap': False, 'team_pad_frame': True,
     'optimizer': 'muon', 'adam_lr': 0.0003, 'adamw_lr': 0.0003, 'muon_lr': 0.001, 'optimizer_eps': 1e-5,
     'muon_momentum': 0.95, 'muon_ns_steps': 5, 'weight_decay': 0.0,
     'precision': 'bf16', 'seed': 1, 'checkpoint_seconds': 600, 'seconds': 0,
